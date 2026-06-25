@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
-import { formatCompactNumber, formatNumber } from '@/lib/format'
+import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -68,6 +68,8 @@ export function LogStatCards(props: LogStatCardsProps) {
   const user = useAuthStore((state) => state.auth.user)
   const isAdmin = !!(user?.role && user.role >= 10)
   const [stats, setStats] = useState<{
+    requestCount: number
+    quota: number
     totalTokens: number
     promptTokens: number
     completionTokens: number
@@ -109,6 +111,8 @@ export function LogStatCards(props: LogStatCardsProps) {
         const data = quotaRes?.data || []
         const tokenStats: HistoricalTokenStats = tokenStatsRes?.data || {}
         setStats({
+          requestCount: Number(tokenStats.request_count) || 0,
+          quota: Number(tokenStats.quota) || 0,
           totalTokens: Number(tokenStats.total_tokens) || 0,
           promptTokens: Number(tokenStats.prompt_tokens) || 0,
           completionTokens: Number(tokenStats.completion_tokens) || 0,
@@ -135,6 +139,8 @@ export function LogStatCards(props: LogStatCardsProps) {
   }, [filters, isAdmin, onDataUpdate])
 
   const adaptedStats: Record<string, number> = stats ?? {
+    requestCount: 0,
+    quota: 0,
     totalTokens: 0,
     promptTokens: 0,
     completionTokens: 0,
@@ -151,6 +157,11 @@ export function LogStatCards(props: LogStatCardsProps) {
             displayValue: formatHitRate(rawValue),
             fullValue: formatHitRate(rawValue),
           }
+        : config.key === 'quota'
+          ? {
+              displayValue: formatQuota(rawValue),
+              fullValue: formatQuota(rawValue),
+            }
         : formatStatNumber(rawValue, locale)
 
     return {
@@ -164,7 +175,7 @@ export function LogStatCards(props: LogStatCardsProps) {
 
   return (
     <div className='overflow-hidden rounded-lg border'>
-      <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-5'>
+      <div className='divide-border/60 grid min-w-0 grid-cols-2 divide-x sm:grid-cols-3 lg:grid-cols-7'>
         {items.map((it, idx) => {
           const Icon = it.icon
           return (

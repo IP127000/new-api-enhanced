@@ -17,6 +17,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import {
+  Hash,
+  Coins,
   Layers,
   LogIn,
   LogOut,
@@ -40,6 +42,20 @@ export function useModelStatCardsConfig(): StatCardConfig[] {
   const { t } = useTranslation()
 
   return [
+    {
+      key: 'count',
+      title: t('Total Count'),
+      description: t('Statistical count'),
+      icon: Hash,
+      getValue: (stat) => stat?.requestCount ?? 0,
+    },
+    {
+      key: 'quota',
+      title: t('Total Quota'),
+      description: t('Statistical quota'),
+      icon: Coins,
+      getValue: (stat) => stat?.quota ?? 0,
+    },
     {
       key: 'totalTokens',
       title: t('Total Tokens'),
