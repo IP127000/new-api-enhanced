@@ -20,7 +20,11 @@ project link, NOTICE terms, and AGPLv3 obligations are preserved.
    (Codex) requests channel-affine and synchronizes `Session-Id`, `Session_id`,
    and `prompt_cache_key`, reducing cache loss from channel splitting or
    inconsistent cache identity.
-3. **Cache metrics visibility**: usage logs show cache-hit tokens and hit rate.
+3. **Subscription-channel failover optimization**: each channel consumes its
+   configured retry budget within the same request before failover moves to the
+   next available channel; exhausted channels are skipped for that request, and
+   successful failover updates affinity to the final successful channel.
+4. **Cache metrics visibility**: usage logs show cache-hit tokens and hit rate.
 
 ## Usage
 
@@ -82,6 +86,9 @@ platforms. They should not be committed to the public repository.
   that group, model, and channel ability state are consistent.
 - If the database already contains customized Codex affinity templates, confirm
   that they synchronize `Session-Id`, `Session_id`, and `prompt_cache_key`.
+- When multiple subscription channels serve the same model, set clear
+  priorities. Failover skips exhausted channels within the current request and
+  refreshes affinity after a successful fallback.
 - Use Redis in production. Multi-node deployments should use the same
   `SESSION_SECRET`.
 - Public repositories should not contain API keys, subscription credentials,
@@ -91,7 +98,8 @@ platforms. They should not be committed to the public repository.
 ## Verification
 
 ```bash
-go test ./service ./relay/common ./relay/channel/codex ./setting/operation_setting
+go test ./model ./service ./controller
+go test ./relay/...
 ```
 
 After startup:

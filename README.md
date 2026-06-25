@@ -13,7 +13,8 @@ NOTICE 和 AGPLv3 许可义务均保留。
 
 1. **Codex 流式响应稳定性**：修正 Responses API 在工具调用边界的结束判定，避免正常流结束被记录为异常断流，并减少 `client_gone`、`scanner error` 等误报。
 2. **订阅渠道缓存命中优化**：为 ChatGPT Subscription (Codex) 请求保持渠道亲和，并同步 `Session-Id`、`Session_id` 与 `prompt_cache_key`，降低同一会话跨渠道转发或缓存身份不一致造成的缓存损失。
-3. **缓存指标可观测性**：在使用日志中展示缓存命中 token 与命中率。
+3. **订阅渠道故障转移优化**：同一请求内按渠道逐个消耗最大重试次数，失败耗尽后切换到下一个可用渠道；已耗尽渠道不会在本次请求内反复命中，成功后亲和缓存更新到最终成功渠道。
+4. **缓存指标可观测性**：在使用日志中展示缓存命中 token 与命中率。
 
 ## 使用方式
 
@@ -70,13 +71,15 @@ Compose 覆盖文件、环境变量、密钥管理器或部署平台中，不应
 
 - ChatGPT Subscription (Codex) 渠道建议开启渠道亲和，并确认分组、模型和渠道能力状态一致。
 - 如果数据库中已有自定义 Codex 亲和模板，请确认模板包含 `Session-Id`、`Session_id` 与 `prompt_cache_key` 的同步逻辑。
+- 多个订阅渠道承载同一模型时，建议设置清晰的优先级；故障转移会在当前请求内跳过已耗尽渠道，并在成功后刷新亲和目标。
 - 生产环境建议启用 Redis；多节点部署应使用一致的 `SESSION_SECRET`。
 - 公开仓库不应包含 API 密钥、订阅凭据、私有主机解析、内网地址、私有部署命令或服务器交接文档。
 
 ## 验证
 
 ```bash
-go test ./service ./relay/common ./relay/channel/codex ./setting/operation_setting
+go test ./model ./service ./controller
+go test ./relay/...
 ```
 
 服务启动后可检查：

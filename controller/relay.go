@@ -187,16 +187,31 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	maxAttemptsPerChannel := relayAttemptsPerChannel()
+	var currentChannel *model.Channel
+	channelAttempts := 0
 
-	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
-		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
-		if channelErr != nil {
-			logger.LogError(c, channelErr.Error())
-			newAPIError = channelErr
-			break
+	for {
+		if currentChannel == nil {
+			retryParam.SetRetry(0)
+			relayInfo.RetryIndex = 0
+			channel, channelErr := getChannel(c, relayInfo, retryParam)
+			if channelErr != nil {
+				logger.LogError(c, channelErr.Error())
+				if newAPIError != nil {
+					logger.LogInfo(c, "本请求所有候选渠道均已尝试失败，返回最后一次上游错误")
+					break
+				}
+				newAPIError = channelErr
+				break
+			}
+			currentChannel = channel
+			channelAttempts = 0
 		}
 
+		channel := currentChannel
+		channelAttempts++
+		relayInfo.RetryIndex = channelAttempts - 1
 		addUsedChannel(c, channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
@@ -232,9 +247,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError)
 
-		if !shouldRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry()) {
+		if !shouldRetry(c, newAPIError, 1) {
 			break
 		}
+
+		if channelAttempts < maxAttemptsPerChannel {
+			continue
+		}
+
+		retryParam.ExcludeChannel(channel.Id)
+		logger.LogInfo(c, fmt.Sprintf("渠道 #%d 已连续失败 %d 次，本请求切换到下一个可用渠道", channel.Id, channelAttempts))
+		currentChannel = nil
+		channelAttempts = 0
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -351,6 +375,13 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 		return false
 	}
 	return operation_setting.ShouldRetryByStatusCode(code)
+}
+
+func relayAttemptsPerChannel() int {
+	if common.RetryTimes <= 0 {
+		return 1
+	}
+	return common.RetryTimes
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError) {

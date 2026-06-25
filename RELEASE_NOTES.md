@@ -1,3 +1,27 @@
+# New API Enhanced v1.0.0-enhanced.2-routefix1
+
+Route failover release for ChatGPT Subscription (Codex) channel groups.
+
+## Enhancements
+
+1. **Per-channel retry budget**: a channel now consumes the configured retry budget before the request moves to another available channel.
+2. **Request-local channel exhaustion**: channels that have exhausted their retries are skipped for the rest of the current request, avoiding repeated routing to the same failing channel.
+3. **Affinity refresh on successful fallback**: when failover succeeds on a later channel, channel affinity is updated to that final successful channel.
+4. **Broader regression coverage**: tests cover three-channel and five-channel fallback, including affinity starting from a non-primary channel.
+
+## Verification
+
+```bash
+go test ./model ./service ./controller
+go test ./relay/...
+```
+
+## Compatibility
+
+This release preserves existing channel priority, weight, group, model, path filtering, and affinity behavior. The channel exhaustion list is request-local only; a new client request starts from affinity or normal channel selection again.
+
+---
+
 # New API Enhanced v1.0.0-enhanced.1
 
 Initial public release of New API Enhanced as an independent downstream build.
