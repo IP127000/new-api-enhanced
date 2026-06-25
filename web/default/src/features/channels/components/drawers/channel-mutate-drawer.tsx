@@ -16,15 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import {
-  type ReactNode,
-  useEffect,
-  useState,
-  useMemo,
-  useCallback,
-  useRef,
-} from 'react'
-import { type SubmitErrorHandler, useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
@@ -45,11 +36,28 @@ import {
   SlidersHorizontal,
   Wand2,
 } from 'lucide-react'
+import {
+  type ReactNode,
+  useEffect,
+  useState,
+  useMemo,
+  useCallback,
+  useRef,
+} from 'react'
+import { type SubmitErrorHandler, useForm } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { getLobeIcon } from '@/lib/lobe-icon'
-import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
-import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
+
+import {
+  sideDrawerContentClassName,
+  sideDrawerFooterClassName,
+  sideDrawerFormClassName,
+  sideDrawerHeaderClassName,
+  sideDrawerSectionClassName,
+  sideDrawerSwitchItemClassName,
+} from '@/components/drawer-layout'
+import { JsonEditor } from '@/components/json-editor'
+import { MultiSelect } from '@/components/multi-select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -90,20 +98,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import {
-  sideDrawerContentClassName,
-  sideDrawerFooterClassName,
-  sideDrawerFormClassName,
-  sideDrawerHeaderClassName,
-  sideDrawerSectionClassName,
-  sideDrawerSwitchItemClassName,
-} from '@/components/drawer-layout'
-import { JsonEditor } from '@/components/json-editor'
-import { MultiSelect } from '@/components/multi-select'
-import {
-  SecureVerificationDialog,
-  useSecureVerification,
-} from '@/features/auth/secure-verification'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { useHiddenClickUnlock } from '@/hooks/use-hidden-click-unlock'
+import { getLobeIcon } from '@/lib/lobe-icon'
+
 import {
   fetchModels,
   getAllModels,
@@ -334,17 +332,6 @@ export function ChannelMutateDrawer({
   })
 
   const { copyToClipboard } = useCopyToClipboard()
-
-  const {
-    open: verificationOpen,
-    methods: verificationMethods,
-    state: verificationState,
-    executeVerification,
-    withVerification,
-    cancel: cancelVerification,
-    setCode: setVerificationCode,
-    switchMethod: switchVerificationMethod,
-  } = useSecureVerification()
 
   useEffect(() => {
     if (!open) {
@@ -730,18 +717,13 @@ export function ChannelMutateDrawer({
     if (!channelId) return
 
     try {
-      await withVerification(fetchChannelKey, {
-        preferredMethod: 'passkey',
-        title: 'Verify to view channel key',
-        description:
-          'Use Passkey or 2FA to confirm your identity before revealing this channel key.',
-      })
+      await fetchChannelKey()
     } catch (error) {
       if (error instanceof Error) {
         toast.error(error.message)
       }
     }
-  }, [channelId, withVerification, fetchChannelKey])
+  }, [channelId, fetchChannelKey])
 
   const handleRefreshCodexCredential = useCallback(async () => {
     if (!channelId) return
@@ -2013,7 +1995,7 @@ export function ChannelMutateDrawer({
                                       </p>
                                       <p className='text-muted-foreground text-xs'>
                                         {t(
-                                          'Verification required to reveal the saved key.'
+                                          'Saved key is hidden until revealed.'
                                         )}
                                       </p>
                                     </div>
@@ -2023,13 +2005,9 @@ export function ChannelMutateDrawer({
                                         variant='outline'
                                         size='sm'
                                         onClick={handleRevealKey}
-                                        disabled={
-                                          isChannelKeyLoading ||
-                                          verificationState.loading
-                                        }
+                                        disabled={isChannelKeyLoading}
                                       >
-                                        {isChannelKeyLoading ||
-                                        verificationState.loading ? (
+                                        {isChannelKeyLoading ? (
                                           <Loader2 className='mr-2 h-4 w-4 animate-spin' />
                                         ) : (
                                           <Eye className='mr-2 h-4 w-4' />
@@ -2055,7 +2033,7 @@ export function ChannelMutateDrawer({
                                   <Input
                                     readOnly
                                     value={channelKey ?? ''}
-                                    placeholder={t('Hidden — verify to reveal')}
+                                    placeholder={t('Hidden — reveal to view')}
                                     className='font-mono'
                                   />
                                 </div>
@@ -3510,23 +3488,6 @@ export function ChannelMutateDrawer({
             ? parseModelsString(form.getValues('models') || '')
             : undefined
         }
-      />
-
-      <SecureVerificationDialog
-        open={verificationOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            cancelVerification()
-          }
-        }}
-        methods={verificationMethods}
-        state={verificationState}
-        onVerify={async (method, code) => {
-          await executeVerification(method, code)
-        }}
-        onCancel={cancelVerification}
-        onCodeChange={setVerificationCode}
-        onMethodChange={switchVerificationMethod}
       />
 
       {/* Missing Models Confirmation Dialog */}

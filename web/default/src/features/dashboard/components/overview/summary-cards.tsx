@@ -16,15 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useAuthStore } from '@/stores/auth-store'
-import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
-import { formatNumber, formatQuota } from '@/lib/format'
-import { computeTimeRange } from '@/lib/time'
-import { useIsAdmin } from '@/hooks/use-admin'
-import { useStatus } from '@/hooks/use-status'
+
 import { StaggerContainer, StaggerItem } from '@/components/page-transition'
 import {
   getHistoricalTokenStats,
@@ -32,6 +27,13 @@ import {
 } from '@/features/dashboard/api'
 import { useSummaryCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
 import type { QuotaDataItem } from '@/features/dashboard/types'
+import { useIsAdmin } from '@/hooks/use-admin'
+import { useStatus } from '@/hooks/use-status'
+import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
+import { formatNumber, formatQuota } from '@/lib/format'
+import { computeTimeRange } from '@/lib/time'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { StatCard } from '../ui/stat-card'
 
 const SUMMARY_SPARKLINE_BUCKETS = 12
@@ -241,15 +243,19 @@ export function SummaryCards() {
               {t('Usage at a glance')}
             </h3>
             <p className='text-muted-foreground text-sm'>
-              {t('Monitor balance, usage, and request volume')}
+              {t('Monitor token usage, spend, and request volume')}
             </p>
           </div>
         </div>
-        <StaggerContainer className='grid gap-3 md:grid-cols-3'>
+        <StaggerContainer className='grid gap-3 lg:grid-cols-2 2xl:grid-cols-3'>
           {items.map((it) => (
             <StaggerItem
               key={it.key}
-              className='bg-background/60 rounded-xl border p-3'
+              className={
+                it.key === 'historicalTokens'
+                  ? 'bg-background/60 rounded-xl border p-3 lg:col-span-2 2xl:col-span-1'
+                  : 'bg-background/60 rounded-xl border p-3'
+              }
             >
               <StatCard
                 title={it.title}

@@ -16,8 +16,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { api, type ApiRequestConfig } from '@/lib/api'
 import { getGroups as getUserGroups } from '@/features/users/api'
+import { api, type ApiRequestConfig } from '@/lib/api'
+
 import type {
   AddChannelRequest,
   BatchDeleteParams,
@@ -260,16 +261,14 @@ export async function deleteDisabledChannels(): Promise<{
 }
 
 /**
- * Get channel key (requires 2FA verification)
+ * Get channel key.
  */
 export async function getChannelKey(
-  id: number,
-  code?: string
+  id: number
 ): Promise<{ success: boolean; message?: string; data?: { key: string } }> {
-  const payload = code ? { code } : undefined
   const res = await api.post(
     `/api/channel/${id}/key`,
-    payload,
+    undefined,
     channelActionConfig()
   )
   return res.data

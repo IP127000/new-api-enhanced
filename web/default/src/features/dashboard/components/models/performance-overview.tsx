@@ -16,13 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Activity, Gauge, HeartPulse, Timer } from 'lucide-react'
+import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { formatCompactNumber, formatNumber } from '@/lib/format'
-import { cn } from '@/lib/utils'
+
 import { Skeleton } from '@/components/ui/skeleton'
+import { getDefaultDays } from '@/features/dashboard/lib'
+import type { DashboardFilters } from '@/features/dashboard/types'
 import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
 import {
   formatLatency,
@@ -32,10 +33,17 @@ import {
   getSuccessRateTextClass,
 } from '@/features/performance-metrics/lib/format'
 import type { PerfModelSummary } from '@/features/performance-metrics/types'
+import { formatCompactNumber, formatNumber } from '@/lib/format'
+import { computeTimeRange } from '@/lib/time'
+import { cn } from '@/lib/utils'
 
-const PERFORMANCE_WINDOW_HOURS = 24
 const TOP_MODEL_LIMIT = 6
 const LOW_SAMPLE_REQUESTS = 10
+const LOADING_METRIC_KEYS = [
+  'perf-overview-success-rate',
+  'perf-overview-requests',
+  'perf-overview-latency',
+]
 
 type WeightedMetric = 'avg_latency_ms' | 'avg_tps'
 
@@ -62,7 +70,7 @@ function weightedAverage(
     weightTotal += weight
   }
 
-  return weightTotal > 0 ? total / weightTotal : NaN
+  return weightTotal > 0 ? total / weightTotal : Number.NaN
 }
 
 function buildPerformanceSummary(rows: PerfModelSummary[]): PerformanceSummary {
@@ -75,7 +83,7 @@ function buildPerformanceSummary(rows: PerfModelSummary[]): PerformanceSummary {
     0
   )
   const successRate =
-    totalRequests > 0 ? (totalSuccesses / totalRequests) * 100 : NaN
+    totalRequests > 0 ? (totalSuccesses / totalRequests) * 100 : Number.NaN
 
   return {
     totalRequests,
@@ -95,12 +103,29 @@ function buildPerformanceSummary(rows: PerfModelSummary[]): PerformanceSummary {
   }
 }
 
-export function PerformanceOverview() {
+export function PerformanceOverview(props: { filters?: DashboardFilters }) {
   const { t, i18n } = useTranslation()
   const locale = i18n.resolvedLanguage || i18n.language
+  const timeRange = useMemo(
+    () =>
+      computeTimeRange(
+        getDefaultDays(props.filters?.time_granularity),
+        props.filters?.start_timestamp,
+        props.filters?.end_timestamp
+      ),
+    [
+      props.filters?.end_timestamp,
+      props.filters?.start_timestamp,
+      props.filters?.time_granularity,
+    ]
+  )
   const metricsQuery = useQuery({
-    queryKey: ['perf-metrics-summary', PERFORMANCE_WINDOW_HOURS],
-    queryFn: () => getPerfMetricsSummary(PERFORMANCE_WINDOW_HOURS),
+    queryKey: [
+      'perf-metrics-summary',
+      timeRange.start_timestamp,
+      timeRange.end_timestamp,
+    ],
+    queryFn: () => getPerfMetricsSummary(timeRange),
     staleTime: 60 * 1000,
     retry: false,
   })
@@ -142,8 +167,8 @@ export function PerformanceOverview() {
         {/* KPI inline metrics */}
         {loading ? (
           <div className='flex flex-wrap items-center gap-x-5 gap-y-2'>
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className='flex items-center gap-1.5'>
+            {LOADING_METRIC_KEYS.map((key) => (
+              <div key={key} className='flex items-center gap-1.5'>
                 <Skeleton className='h-3 w-14' />
                 <Skeleton className='h-4 w-16' />
               </div>
@@ -233,8 +258,7 @@ function ModelBadge(props: {
   const model = props.model
   const requestCount = Number(model.request_count) || 0
   const successCount = Number(model.success_count) || 0
-  const isLowSample =
-    requestCount > 0 && requestCount < LOW_SAMPLE_REQUESTS
+  const isLowSample = requestCount > 0 && requestCount < LOW_SAMPLE_REQUESTS
   const title = `${model.model_name}: ${formatNumber(successCount, props.locale)}/${formatNumber(requestCount, props.locale)} ${props.requestsLabel}${isLowSample ? `, ${props.lowSampleLabel}` : ''}`
 
   return (

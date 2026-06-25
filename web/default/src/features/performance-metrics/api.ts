@@ -17,13 +17,23 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+
 import type { PerformanceMetricsData, PerfSummaryAllData } from './types'
 
+export type PerfMetricsSummaryParams =
+  | number
+  | 'all'
+  | {
+      start_timestamp: number
+      end_timestamp: number
+    }
+
 export async function getPerfMetricsSummary(
-  hours = 24
+  params: PerfMetricsSummaryParams = 24
 ): Promise<PerfSummaryAllData> {
+  const queryParams = typeof params === 'object' ? params : { hours: params }
   const res = await api.get<PerfSummaryAllData>('/api/perf-metrics/summary', {
-    params: { hours },
+    params: queryParams,
   })
   return res.data
 }

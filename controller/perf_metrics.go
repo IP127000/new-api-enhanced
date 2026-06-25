@@ -13,14 +13,33 @@ import (
 
 func GetPerfMetricsSummary(c *gin.Context) {
 	hours := 24
+	allHistory := false
 	if rawHours := c.Query("hours"); rawHours != "" {
-		if parsed, err := strconv.Atoi(rawHours); err == nil {
+		if rawHours == "all" {
+			allHistory = true
+		} else if parsed, err := strconv.Atoi(rawHours); err == nil {
 			hours = parsed
 		}
 	}
 
 	activeGroups := append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
-	result, err := perfmetrics.QuerySummaryAll(hours, activeGroups)
+	var result perfmetrics.SummaryAllResult
+	var err error
+	startTs, hasStart := parseUnixQuery(c, "start_timestamp")
+	endTs, hasEnd := parseUnixQuery(c, "end_timestamp")
+	if hasStart || hasEnd {
+		if !hasStart {
+			startTs = 0
+		}
+		if !hasEnd {
+			endTs = 0
+		}
+		result, err = perfmetrics.QuerySummaryRange(startTs, endTs, activeGroups)
+	} else if allHistory {
+		result, err = perfmetrics.QuerySummaryRange(0, 0, activeGroups)
+	} else {
+		result, err = perfmetrics.QuerySummaryAll(hours, activeGroups)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"success": false,
@@ -33,6 +52,18 @@ func GetPerfMetricsSummary(c *gin.Context) {
 		"success": true,
 		"data":    result,
 	})
+}
+
+func parseUnixQuery(c *gin.Context, key string) (int64, bool) {
+	raw := c.Query(key)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
 }
 
 func GetPerfMetrics(c *gin.Context) {

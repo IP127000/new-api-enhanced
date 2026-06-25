@@ -156,6 +156,20 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 	}
 	endTs := time.Now().Unix()
 	startTs := endTs - int64(hours)*3600
+
+	return QuerySummaryRange(startTs, endTs, groups)
+}
+
+func QuerySummaryRange(startTs int64, endTs int64, groups []string) (SummaryAllResult, error) {
+	if endTs <= 0 {
+		endTs = time.Now().Unix()
+	}
+	if startTs < 0 {
+		startTs = 0
+	}
+	if startTs > endTs {
+		startTs, endTs = endTs, startTs
+	}
 	allowedGroups := allowedGroupSet(groups)
 
 	rows, err := model.GetPerfMetricsSummaryBucketsAll(startTs, endTs, groups)

@@ -1,3 +1,35 @@
+# New API Enhanced v1.0.0-enhanced.2-routefix1-dashboard1-keyreveal1-ui1
+
+Dashboard, key-management, and production UI polish release.
+
+## Enhancements
+
+1. **All-time overview health**: the overview page now uses all-time performance metrics, matching the historical Token, spend, and request totals shown on the same page.
+2. **Range-aware model dashboard**: the data dashboard performance panel follows the selected statistics range and keeps request, cost, input, output, cache, and hit-rate metrics together.
+3. **Overview layout polish**: usage cards, cache details, performance health, and top-model rows were tightened for better alignment and readability on the admin dashboard.
+4. **Channel key reveal workflow**: administrators can reveal saved channel keys from the channel editor without the extra secure-verification dialog.
+
+## Fixes
+
+1. **Success-rate denominator consistency**: performance success rates are calculated from the matching model/request population instead of a mismatched aggregate.
+2. **Pre-consume refund isolation**: failed-request refund handling now copies only the fields needed for refund settlement before running the asynchronous compensation path.
+3. **Dashboard copy accuracy**: overview text now describes Token usage, spend, and request volume instead of balance.
+
+## Verification
+
+```bash
+cd web/default && bun run typecheck
+cd web/default && bunx oxlint -c .oxlintrc.json src/features/dashboard/components/overview/performance-health-panel.tsx src/features/dashboard/components/overview/summary-cards.tsx src/features/dashboard/components/ui/stat-card.tsx
+make build-all-frontends
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=v1.0.0-enhanced.2-routefix1-dashboard1-keyreveal1-ui1'" -o new-api .
+```
+
+## Deployment
+
+This version was deployed with the binary-first production flow: frontend assets and the Linux amd64 binary were built locally, uploaded as a compressed artifact, verified by SHA-256 checksum, wrapped into a lightweight Docker image, health-checked on a standby local port, then switched through Caddy after configuration validation.
+
+---
+
 # New API Enhanced v1.0.0-enhanced.2-routefix1
 
 Route failover release for ChatGPT Subscription (Codex) channel groups.

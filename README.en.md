@@ -24,7 +24,14 @@ project link, NOTICE terms, and AGPLv3 obligations are preserved.
    configured retry budget within the same request before failover moves to the
    next available channel; exhausted channels are skipped for that request, and
    successful failover updates affinity to the final successful channel.
-4. **Cache metrics visibility**: usage logs show cache-hit tokens and hit rate.
+4. **Cache and performance visibility**: usage logs show cache-hit tokens and
+   hit rate. The overview page shows all-time tokens, spend, requests, and
+   performance health, while the model dashboard shows input, output, cache,
+   hit rate, spend, and request counts for the selected time range.
+5. **Admin dashboard usability**: improves the overview usage cards,
+   performance health panel, and top-model layout. Channel editing also lets
+   administrators reveal saved keys directly, reducing operational friction
+   during troubleshooting.
 
 ## Usage
 
@@ -89,6 +96,8 @@ platforms. They should not be committed to the public repository.
 - When multiple subscription channels serve the same model, set clear
   priorities. Failover skips exhausted channels within the current request and
   refreshes affinity after a successful fallback.
+- The overview performance health panel is all-time; the model dashboard
+  performance health follows the selected time range.
 - Use Redis in production. Multi-node deployments should use the same
   `SESSION_SECRET`.
 - Public repositories should not contain API keys, subscription credentials,
