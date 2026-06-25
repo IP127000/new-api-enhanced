@@ -33,6 +33,16 @@ export interface QuotaDataItem {
   quota?: number
 }
 
+export interface HistoricalTokenStats {
+  quota?: number
+  total_tokens?: number
+  prompt_tokens?: number
+  completion_tokens?: number
+  cache_tokens?: number
+  cache_hit_rate?: number
+  request_count?: number
+}
+
 export interface FlowQuotaDataItem {
   user_id?: number
   username?: string

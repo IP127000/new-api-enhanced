@@ -17,18 +17,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import {
-  Hash,
-  Coins,
   Layers,
-  Gauge,
-  Zap,
-  Flame,
+  LogIn,
+  LogOut,
+  DatabaseZap,
+  Percent,
   TrendingUp,
   Activity,
   type LucideIcon,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { safeDivide } from '@/features/dashboard/lib'
 
 interface StatCardConfig {
   key: string
@@ -43,47 +41,49 @@ export function useModelStatCardsConfig(): StatCardConfig[] {
 
   return [
     {
-      key: 'count',
-      title: t('Total Count'),
-      description: t('Statistical count'),
-      icon: Hash,
-      getValue: (stat) => stat?.rpm ?? 0,
-    },
-    {
-      key: 'quota',
-      title: t('Total Quota'),
-      description: t('Statistical quota'),
-      icon: Coins,
-      getValue: (stat) => stat?.quota ?? 0,
-    },
-    {
-      key: 'tokens',
+      key: 'totalTokens',
       title: t('Total Tokens'),
       description: t('Statistical tokens'),
       icon: Layers,
-      getValue: (stat) => stat?.tpm ?? 0,
+      getValue: (stat) => stat?.totalTokens ?? 0,
     },
     {
-      key: 'avgRpm',
-      title: t('Average RPM'),
-      description: t('Requests per minute'),
-      icon: Gauge,
-      getValue: (stat, timeRangeMinutes = 1) =>
-        safeDivide(stat?.rpm ?? 0, timeRangeMinutes),
+      key: 'inputTokens',
+      title: t('Input Tokens'),
+      description: t('Input tokens in selected range'),
+      icon: LogIn,
+      getValue: (stat) => stat?.promptTokens ?? 0,
     },
     {
-      key: 'avgTpm',
-      title: t('Average TPM'),
-      description: t('Tokens per minute'),
-      icon: Zap,
-      getValue: (stat, timeRangeMinutes = 1) =>
-        safeDivide(stat?.tpm ?? 0, timeRangeMinutes),
+      key: 'outputTokens',
+      title: t('Output Tokens'),
+      description: t('Output tokens in selected range'),
+      icon: LogOut,
+      getValue: (stat) => stat?.completionTokens ?? 0,
+    },
+    {
+      key: 'cacheTokens',
+      title: t('Cache Hit Tokens'),
+      description: t('Cache hit tokens in selected range'),
+      icon: DatabaseZap,
+      getValue: (stat) => stat?.cacheTokens ?? 0,
+    },
+    {
+      key: 'cacheHitRate',
+      title: t('Hit Rate'),
+      description: t('Prompt cache hit rate'),
+      icon: Percent,
+      getValue: (stat) => stat?.cacheHitRate ?? 0,
     },
   ]
 }
 
 export function useSummaryCardsConfig(totals: {
-  todayUsageDisplay: string
+  historicalTokensDisplay: string
+  historicalInputTokensDisplay: string
+  historicalOutputTokensDisplay: string
+  historicalCacheTokensDisplay: string
+  historicalCacheHitRateDisplay: string
   usedDisplay: string
   requestCountDisplay: string
   currencyLabel: string
@@ -93,13 +93,29 @@ export function useSummaryCardsConfig(totals: {
 
   return [
     {
-      key: 'todayUsage',
-      title: t('Last 24h usage'),
-      value: totals.todayUsageDisplay,
-      description: totals.currencyEnabled
-        ? `${t('Consumed in the last 24 hours')} (${totals.currencyLabel})`
-        : t('Consumed in the last 24 hours'),
-      icon: Flame,
+      key: 'historicalTokens',
+      title: t('Tokens since launch'),
+      value: totals.historicalTokensDisplay,
+      description: t('Total Tokens'),
+      icon: Layers,
+      details: [
+        {
+          label: t('Input Tokens'),
+          value: totals.historicalInputTokensDisplay,
+        },
+        {
+          label: t('Output Tokens'),
+          value: totals.historicalOutputTokensDisplay,
+        },
+        {
+          label: t('Cache Hit Tokens'),
+          value: totals.historicalCacheTokensDisplay,
+        },
+        {
+          label: t('Hit Rate'),
+          value: totals.historicalCacheHitRateDisplay,
+        },
+      ],
     },
     {
       key: 'usage',
@@ -109,6 +125,7 @@ export function useSummaryCardsConfig(totals: {
         ? `${t('Total consumed')} (${totals.currencyLabel})`
         : t('Total consumed quota'),
       icon: TrendingUp,
+      details: undefined,
     },
     {
       key: 'requests',
@@ -116,6 +133,7 @@ export function useSummaryCardsConfig(totals: {
       value: totals.requestCountDisplay,
       description: t('Total requests made'),
       icon: Activity,
+      details: undefined,
     },
   ]
 }

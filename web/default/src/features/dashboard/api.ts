@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 import type {
   FlowQuotaDataItem,
+  HistoricalTokenStats,
   QuotaDataItem,
   UptimeGroupResult,
 } from './types'
@@ -78,6 +79,33 @@ export async function getFlowQuotaDates(
   const res = await api.get<{
     success: boolean
     data?: FlowQuotaDataItem[]
+    message?: string
+  }>(endpoint, { params })
+  return res.data
+}
+
+export async function getHistoricalTokenStats(isAdmin = false) {
+  const endpoint = isAdmin ? '/api/log/stat' : '/api/log/self/stat'
+  const res = await api.get<{
+    success: boolean
+    data?: HistoricalTokenStats
+    message?: string
+  }>(endpoint)
+  return res.data
+}
+
+export async function getDashboardTokenStats(
+  params: {
+    start_timestamp: number
+    end_timestamp: number
+    username?: string
+  },
+  isAdmin = false
+) {
+  const endpoint = isAdmin ? '/api/log/stat' : '/api/log/self/stat'
+  const res = await api.get<{
+    success: boolean
+    data?: HistoricalTokenStats
     message?: string
   }>(endpoint, { params })
   return res.data

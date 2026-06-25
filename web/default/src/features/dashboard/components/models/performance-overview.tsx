@@ -18,8 +18,9 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Gauge, HeartPulse, Timer } from 'lucide-react'
+import { Activity, Gauge, HeartPulse, Timer } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { formatCompactNumber, formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
 import { getPerfMetricsSummary } from '@/features/performance-metrics/api'
@@ -34,8 +35,9 @@ import type { PerfModelSummary } from '@/features/performance-metrics/types'
 
 const PERFORMANCE_WINDOW_HOURS = 24
 const TOP_MODEL_LIMIT = 6
+const LOW_SAMPLE_REQUESTS = 10
 
-type WeightedMetric = 'avg_latency_ms' | 'avg_tps' | 'success_rate'
+type WeightedMetric = 'avg_latency_ms' | 'avg_tps'
 
 type PerformanceSummary = {
   totalRequests: number
@@ -44,45 +46,58 @@ type PerformanceSummary = {
   successRate: number
 }
 
-function simpleAverage(
+function weightedAverage(
   rows: PerfModelSummary[],
   metric: WeightedMetric,
   isValid: (value: number) => boolean
 ): number {
   let total = 0
-  let count = 0
+  let weightTotal = 0
 
   for (const row of rows) {
     const value = Number(row[metric])
-    if (!isValid(value)) continue
-    total += value
-    count++
+    const weight = Number(row.request_count) || 0
+    if (!isValid(value) || weight <= 0) continue
+    total += value * weight
+    weightTotal += weight
   }
 
-  return count > 0 ? total / count : NaN
+  return weightTotal > 0 ? total / weightTotal : NaN
 }
 
 function buildPerformanceSummary(rows: PerfModelSummary[]): PerformanceSummary {
+  const totalRequests = rows.reduce(
+    (total, row) => total + (Number(row.request_count) || 0),
+    0
+  )
+  const totalSuccesses = rows.reduce(
+    (total, row) => total + (Number(row.success_count) || 0),
+    0
+  )
+  const successRate =
+    totalRequests > 0 ? (totalSuccesses / totalRequests) * 100 : NaN
+
   return {
-    totalRequests: rows.length,
+    totalRequests,
     avgLatencyMs: Math.round(
-      simpleAverage(
+      weightedAverage(
         rows,
         'avg_latency_ms',
         (value) => Number.isFinite(value) && value > 0
       )
     ),
-    avgTps: simpleAverage(
+    avgTps: weightedAverage(
       rows,
       'avg_tps',
       (value) => Number.isFinite(value) && value > 0
     ),
-    successRate: simpleAverage(rows, 'success_rate', Number.isFinite),
+    successRate,
   }
 }
 
 export function PerformanceOverview() {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = i18n.resolvedLanguage || i18n.language
   const metricsQuery = useQuery({
     queryKey: ['perf-metrics-summary', PERFORMANCE_WINDOW_HOURS],
     queryFn: () => getPerfMetricsSummary(PERFORMANCE_WINDOW_HOURS),
@@ -124,7 +139,7 @@ export function PerformanceOverview() {
         {/* Separator */}
         <div className='bg-border hidden h-4 w-px sm:block' />
 
-        {/* 3 KPI inline metrics */}
+        {/* KPI inline metrics */}
         {loading ? (
           <div className='flex flex-wrap items-center gap-x-5 gap-y-2'>
             {Array.from({ length: 3 }).map((_, i) => (
@@ -141,6 +156,11 @@ export function PerformanceOverview() {
               label={t('Success rate')}
               value={formatUptimePct(summary.successRate)}
               valueClassName={getSuccessRateTextClass(summary.successRate)}
+            />
+            <InlineMetric
+              icon={Activity}
+              label={t('Requests')}
+              value={formatNumber(summary.totalRequests, locale)}
             />
             <InlineMetric
               icon={Timer}
@@ -162,7 +182,13 @@ export function PerformanceOverview() {
         {!loading && hasData && (
           <div className='flex flex-wrap items-center gap-1.5'>
             {topModels.map((model) => (
-              <ModelBadge key={model.model_name} model={model} />
+              <ModelBadge
+                key={model.model_name}
+                model={model}
+                locale={locale}
+                requestsLabel={t('Requests')}
+                lowSampleLabel={t('Low sample')}
+              />
             ))}
           </div>
         )}
@@ -198,11 +224,27 @@ function InlineMetric(props: {
   )
 }
 
-function ModelBadge(props: { model: PerfModelSummary }) {
+function ModelBadge(props: {
+  model: PerfModelSummary
+  locale: Intl.LocalesArgument
+  requestsLabel: string
+  lowSampleLabel: string
+}) {
   const model = props.model
+  const requestCount = Number(model.request_count) || 0
+  const successCount = Number(model.success_count) || 0
+  const isLowSample =
+    requestCount > 0 && requestCount < LOW_SAMPLE_REQUESTS
+  const title = `${model.model_name}: ${formatNumber(successCount, props.locale)}/${formatNumber(requestCount, props.locale)} ${props.requestsLabel}${isLowSample ? `, ${props.lowSampleLabel}` : ''}`
 
   return (
-    <span className='bg-muted/50 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1'>
+    <span
+      className={cn(
+        'bg-muted/50 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1',
+        isLowSample && 'ring-muted-foreground/20 ring-1'
+      )}
+      title={title}
+    >
       <span className='max-w-[10rem] truncate font-mono text-[11px]'>
         {model.model_name}
       </span>
@@ -220,6 +262,9 @@ function ModelBadge(props: { model: PerfModelSummary }) {
         )}
       >
         {formatUptimePct(model.success_rate)}
+      </span>
+      <span className='text-muted-foreground font-mono text-[10px] tabular-nums'>
+        {formatCompactNumber(requestCount, props.locale)}
       </span>
     </span>
   )

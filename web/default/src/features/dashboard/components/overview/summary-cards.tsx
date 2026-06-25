@@ -19,17 +19,21 @@ For commercial licensing, please contact support@quantumnous.com
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { ArrowRight, Flame, ShieldCheck, TrendingDown } from 'lucide-react'
+import { ArrowRight, Layers, ShieldCheck, TrendingDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { getCurrencyLabel, isCurrencyDisplayEnabled } from '@/lib/currency'
 import { formatNumber, formatQuota } from '@/lib/format'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
+import { useIsAdmin } from '@/hooks/use-admin'
 import { useStatus } from '@/hooks/use-status'
 import { Button } from '@/components/ui/button'
 import { StaggerContainer, StaggerItem } from '@/components/page-transition'
-import { getUserQuotaDates } from '@/features/dashboard/api'
+import {
+  getHistoricalTokenStats,
+  getUserQuotaDates,
+} from '@/features/dashboard/api'
 import { useSummaryCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
 import type { QuotaDataItem } from '@/features/dashboard/types'
 import { StatCard } from '../ui/stat-card'
@@ -116,6 +120,13 @@ function getHealthLevel(remainQuota: number, recentUsage: number): HealthLevel {
   return 'healthy'
 }
 
+function formatHitRate(value: number | null | undefined): string {
+  return Intl.NumberFormat(undefined, {
+    style: 'percent',
+    maximumFractionDigits: 2,
+  }).format(value || 0)
+}
+
 const HEALTH_CONFIG: Record<
   HealthLevel,
   { dotClass: string; labelKey: string }
@@ -138,35 +149,77 @@ export function SummaryCards() {
   const { t } = useTranslation()
   const user = useAuthStore((state) => state.auth.user)
   const { status, loading } = useStatus()
+  const isAdmin = useIsAdmin()
 
   const summaryTimeRange = useMemo(() => computeTimeRange(1), [])
   const remainQuota = Number(user?.quota ?? 0)
-  const usedQuota = Number(user?.used_quota ?? 0)
-  const requestCount = Number(user?.request_count ?? 0)
 
   const usageTrendQuery = useQuery({
     queryKey: [
       'dashboard',
       'overview',
       'summary-sparklines',
+      isAdmin,
       summaryTimeRange.start_timestamp,
       summaryTimeRange.end_timestamp,
     ],
     queryFn: async () =>
-      getUserQuotaDates({
-        start_timestamp: summaryTimeRange.start_timestamp,
-        end_timestamp: summaryTimeRange.end_timestamp,
-        default_time: 'hour',
-      }),
+      getUserQuotaDates(
+        {
+          start_timestamp: summaryTimeRange.start_timestamp,
+          end_timestamp: summaryTimeRange.end_timestamp,
+          default_time: 'hour',
+        },
+        isAdmin
+      ),
     staleTime: 60 * 1000,
   })
 
+  const historicalTokenQuery = useQuery({
+    queryKey: ['dashboard', 'overview', 'historical-token-stats', isAdmin],
+    queryFn: () => getHistoricalTokenStats(isAdmin),
+    staleTime: 60 * 1000,
+  })
+
+  const historicalTokens = Number(
+    historicalTokenQuery.data?.data?.total_tokens ?? 0
+  )
+  const historicalPromptTokens = Number(
+    historicalTokenQuery.data?.data?.prompt_tokens ?? 0
+  )
+  const historicalCompletionTokens = Number(
+    historicalTokenQuery.data?.data?.completion_tokens ?? 0
+  )
+  const historicalCacheTokens = Number(
+    historicalTokenQuery.data?.data?.cache_tokens ?? 0
+  )
+  const historicalCacheHitRate = Number(
+    historicalTokenQuery.data?.data?.cache_hit_rate ?? 0
+  )
+  const historicalQuota = Number(historicalTokenQuery.data?.data?.quota ?? 0)
+  const historicalRequestCount = Number(
+    historicalTokenQuery.data?.data?.request_count ?? 0
+  )
+
   const summaryValues = useMemo(() => {
     return {
-      usedDisplay: formatQuota(usedQuota),
-      requestCountDisplay: formatNumber(requestCount),
+      historicalTokensDisplay: formatNumber(historicalTokens),
+      historicalInputTokensDisplay: formatNumber(historicalPromptTokens),
+      historicalOutputTokensDisplay: formatNumber(historicalCompletionTokens),
+      historicalCacheTokensDisplay: formatNumber(historicalCacheTokens),
+      historicalCacheHitRateDisplay: formatHitRate(historicalCacheHitRate),
+      usedDisplay: formatQuota(historicalQuota),
+      requestCountDisplay: formatNumber(historicalRequestCount),
     }
-  }, [requestCount, usedQuota])
+  }, [
+    historicalCacheHitRate,
+    historicalCacheTokens,
+    historicalCompletionTokens,
+    historicalPromptTokens,
+    historicalQuota,
+    historicalRequestCount,
+    historicalTokens,
+  ])
 
   const currencyEnabledFromStore = isCurrencyDisplayEnabled()
   const statusCurrencyFlag =
@@ -208,11 +261,8 @@ export function SummaryCards() {
   const healthCfg = HEALTH_CONFIG[healthLevel]
   const runwayDays = getRunwayDays(remainQuota, recentUsage)
 
-  const todayUsageDisplay = formatQuota(recentUsage)
-
   const items = useSummaryCardsConfig({
     ...summaryValues,
-    todayUsageDisplay,
     currencyEnabled,
     currencyLabel,
   }).map((config, index) => {
@@ -224,14 +274,17 @@ export function SummaryCards() {
       value: config.value,
       desc: config.description,
       icon: config.icon,
+      details: config.details,
       tone: tones[index] ?? 'gray',
       sparkline:
-        config.key === 'todayUsage'
-          ? sparklineData.usage
+        config.key === 'historicalTokens'
+          ? undefined
           : getSummarySparkline(config.key, sparklineData),
       sparklineVariant: 'line' as const,
     }
   })
+  const summaryLoading =
+    loading || usageTrendQuery.isLoading || historicalTokenQuery.isLoading
 
   return (
     <div className='bg-card overflow-hidden rounded-2xl border shadow-xs'>
@@ -259,9 +312,10 @@ export function SummaryCards() {
                   description={it.desc}
                   icon={it.icon}
                   tone={it.tone}
+                  details={it.details}
                   sparkline={it.sparkline}
                   sparklineVariant={it.sparklineVariant}
-                  loading={loading}
+                  loading={summaryLoading}
                 />
               </StaggerItem>
             ))}
@@ -292,11 +346,11 @@ export function SummaryCards() {
             <div className='grid grid-cols-2 gap-2'>
               <div className='bg-background/60 rounded-lg px-2.5 py-2'>
                 <div className='text-muted-foreground flex items-center gap-1 text-[11px] leading-none font-medium'>
-                  <Flame className='size-3 shrink-0' aria-hidden='true' />
-                  <span className='truncate'>{t('Last 24h usage')}</span>
+                  <Layers className='size-3 shrink-0' aria-hidden='true' />
+                  <span className='truncate'>{t('Tokens since launch')}</span>
                 </div>
                 <div className='text-foreground mt-1.5 truncate text-xs font-semibold tabular-nums'>
-                  {formatQuota(recentUsage)}
+                  {formatNumber(historicalTokens)}
                 </div>
               </div>
               <div className='bg-background/60 rounded-lg px-2.5 py-2'>

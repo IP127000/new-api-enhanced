@@ -554,6 +554,7 @@ type Stat struct {
 	TotalTokens      int     `json:"total_tokens"`
 	CacheTokens      int     `json:"cache_tokens"`
 	CacheHitRate     float64 `json:"cache_hit_rate"`
+	RequestCount     int     `json:"request_count"`
 	Rpm              int     `json:"rpm"`
 	Tpm              int     `json:"tpm"`
 }
@@ -619,7 +620,7 @@ func sumCacheTokens(tx *gorm.DB) (int, error) {
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string, requestId string, upstreamRequestId string) (stat Stat, err error) {
 	tx := LOG_DB.Table("logs").Select(
-		"COALESCE(SUM(quota), 0) quota, COALESCE(SUM(prompt_tokens), 0) prompt_tokens, COALESCE(SUM(completion_tokens), 0) completion_tokens, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) total_tokens",
+		"COALESCE(SUM(quota), 0) quota, COALESCE(SUM(prompt_tokens), 0) prompt_tokens, COALESCE(SUM(completion_tokens), 0) completion_tokens, COALESCE(SUM(prompt_tokens), 0) + COALESCE(SUM(completion_tokens), 0) total_tokens, COUNT(*) request_count",
 	)
 	if tx, err = applyLogStatFilters(tx, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group, requestId, upstreamRequestId); err != nil {
 		return stat, err

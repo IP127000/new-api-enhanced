@@ -12,6 +12,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/setting/perf_metrics_setting"
+
+	"github.com/bytedance/gopkg/util/gopool"
 )
 
 var hotBuckets sync.Map
@@ -24,7 +26,30 @@ func Init() {
 	go flushLoop()
 }
 
+func QueueRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
+	if !claimRelaySample(info) {
+		return
+	}
+	gopool.Go(func() {
+		recordRelaySample(info, success, outputTokens)
+	})
+}
+
 func RecordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
+	if !claimRelaySample(info) {
+		return
+	}
+	recordRelaySample(info, success, outputTokens)
+}
+
+func claimRelaySample(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	return info.PerfMetricRecorded.CompareAndSwap(false, true)
+}
+
+func recordRelaySample(info *relaycommon.RelayInfo, success bool, outputTokens int64) {
 	if info == nil {
 		return
 	}
@@ -189,6 +214,7 @@ func QuerySummaryAll(hours int, groups []string) (SummaryAllResult, error) {
 			AvgTps:             math.Round(avgTps*100) / 100,
 			RecentSuccessRates: recentSuccessRates(modelBuckets[name], 3),
 			RequestCount:       total.requestCount,
+			SuccessCount:       total.successCount,
 		})
 	}
 	sort.Slice(models, func(i, j int) bool {

@@ -19,20 +19,20 @@ For commercial licensing, please contact support@quantumnous.com
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
-import { formatCompactNumber, formatNumber, formatQuota } from '@/lib/format'
+import { formatCompactNumber, formatNumber } from '@/lib/format'
 import { computeTimeRange } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { Skeleton } from '@/components/ui/skeleton'
-import { getUserQuotaDates } from '@/features/dashboard/api'
-import { useModelStatCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
 import {
-  buildQueryParams,
-  calculateDashboardStats,
-  getDefaultDays,
-} from '@/features/dashboard/lib'
+  getDashboardTokenStats,
+  getUserQuotaDates,
+} from '@/features/dashboard/api'
+import { useModelStatCardsConfig } from '@/features/dashboard/hooks/use-dashboard-config'
+import { buildQueryParams, getDefaultDays } from '@/features/dashboard/lib'
 import type {
   QuotaDataItem,
   DashboardFilters,
+  HistoricalTokenStats,
 } from '@/features/dashboard/types'
 
 interface LogStatCardsProps {
@@ -55,20 +55,27 @@ function formatStatNumber(value: number, locale: Intl.LocalesArgument) {
   }
 }
 
+function formatHitRate(value: number | null | undefined): string {
+  return Intl.NumberFormat(undefined, {
+    style: 'percent',
+    maximumFractionDigits: 2,
+  }).format(value || 0)
+}
+
 export function LogStatCards(props: LogStatCardsProps) {
   const { i18n } = useTranslation()
   const statCardsConfig = useModelStatCardsConfig()
   const user = useAuthStore((state) => state.auth.user)
   const isAdmin = !!(user?.role && user.role >= 10)
   const [stats, setStats] = useState<{
-    totalQuota: number
-    totalCount: number
     totalTokens: number
+    promptTokens: number
+    completionTokens: number
+    cacheTokens: number
+    cacheHitRate: number
   } | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
-
-  const [timeRangeMinutes, setTimeRangeMinutes] = useState(0)
 
   const { filters, onDataUpdate } = props
 
@@ -85,14 +92,29 @@ export function LogStatCards(props: LogStatCardsProps) {
       filters?.start_timestamp,
       filters?.end_timestamp
     )
-    const timeDiff = (timeRange.end_timestamp - timeRange.start_timestamp) / 60
-    setTimeRangeMinutes(timeDiff)
 
-    getUserQuotaDates(buildQueryParams(timeRange, filters), isAdmin)
-      .then((res) => {
+    const queryParams = buildQueryParams(timeRange, filters)
+    const statParams = {
+      start_timestamp: timeRange.start_timestamp,
+      end_timestamp: timeRange.end_timestamp,
+      ...(isAdmin && filters?.username ? { username: filters.username } : {}),
+    }
+
+    Promise.all([
+      getUserQuotaDates(queryParams, isAdmin),
+      getDashboardTokenStats(statParams, isAdmin),
+    ])
+      .then(([quotaRes, tokenStatsRes]) => {
         if (abortController.signal.aborted) return
-        const data = res?.data || []
-        setStats(calculateDashboardStats(data))
+        const data = quotaRes?.data || []
+        const tokenStats: HistoricalTokenStats = tokenStatsRes?.data || {}
+        setStats({
+          totalTokens: Number(tokenStats.total_tokens) || 0,
+          promptTokens: Number(tokenStats.prompt_tokens) || 0,
+          completionTokens: Number(tokenStats.completion_tokens) || 0,
+          cacheTokens: Number(tokenStats.cache_tokens) || 0,
+          cacheHitRate: Number(tokenStats.cache_hit_rate) || 0,
+        })
         onDataUpdate?.(data, false)
       })
       .catch(() => {
@@ -112,20 +134,22 @@ export function LogStatCards(props: LogStatCardsProps) {
     }
   }, [filters, isAdmin, onDataUpdate])
 
-  const adaptedStats = {
-    rpm: stats?.totalCount ?? 0,
-    quota: stats?.totalQuota ?? 0,
-    tpm: stats?.totalTokens ?? 0,
+  const adaptedStats: Record<string, number> = stats ?? {
+    totalTokens: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cacheTokens: 0,
+    cacheHitRate: 0,
   }
 
   const items = statCardsConfig.map((config) => {
-    const rawValue = config.getValue(adaptedStats, timeRangeMinutes)
+    const rawValue = config.getValue(adaptedStats)
     const locale = i18n.resolvedLanguage || i18n.language
     const formatted =
-      config.key === 'quota'
+      config.key === 'cacheHitRate'
         ? {
-            displayValue: formatQuota(rawValue),
-            fullValue: formatQuota(rawValue),
+            displayValue: formatHitRate(rawValue),
+            fullValue: formatHitRate(rawValue),
           }
         : formatStatNumber(rawValue, locale)
 
