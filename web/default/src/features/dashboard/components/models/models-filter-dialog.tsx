@@ -16,13 +16,20 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Filter, RotateCcw, Calendar, Search } from 'lucide-react'
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { useAuthStore } from '@/stores/auth-store'
-import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
-import { cn } from '@/lib/utils'
+
+import { DateTimePicker } from '@/components/datetime-picker'
+import { Dialog } from '@/components/dialog'
 import { Button } from '@/components/ui/button'
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldLabel,
+} from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -34,8 +41,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { DateTimePicker } from '@/components/datetime-picker'
-import { Dialog } from '@/components/dialog'
+import { getEarliestQuotaDataTime } from '@/features/dashboard/api'
 import {
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
@@ -43,11 +49,16 @@ import {
 import {
   buildDefaultDashboardFilters,
   cleanFilters,
+  getDashboardRangeDaysFromFilters,
+  getMaxDashboardRangeDays,
 } from '@/features/dashboard/lib'
 import type {
   DashboardChartPreferences,
   DashboardFilters,
 } from '@/features/dashboard/types'
+import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
+import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 interface ModelsFilterProps {
   preferences: DashboardChartPreferences
@@ -74,10 +85,8 @@ function granularityForRangeDays(days: number): TimeGranularity {
 function detectQuickRangeDays(
   filters: DashboardFilters | undefined
 ): number | null {
-  const start = filters?.start_timestamp
-  const end = filters?.end_timestamp
-  if (!start || !end) return null
-  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000)
+  const days = getDashboardRangeDaysFromFilters(filters)
+  if (!days) return null
   return TIME_RANGE_PRESETS.some((preset) => preset.days === days) ? days : null
 }
 
@@ -99,15 +108,41 @@ export function ModelsFilter(props: ModelsFilterProps) {
   const { t } = useTranslation()
   // 使用已缓存的用户数据，避免重复调用 API
   const user = useAuthStore((state) => state.auth.user)
-  const isAdmin = user?.role && user.role >= 10
+  const isAdmin = Boolean(user?.role && user.role >= 10)
 
   const [open, setOpen] = useState(false)
   const [filters, setFilters] = useState<DashboardFilters>(
-    () => props.currentFilters ?? buildDefaultDashboardFilters(props.preferences)
+    () =>
+      props.currentFilters ?? buildDefaultDashboardFilters(props.preferences)
   )
   const [selectedRange, setSelectedRange] = useState<number | null>(() =>
     detectQuickRangeDays(props.currentFilters)
   )
+  const [customDays, setCustomDays] = useState(() =>
+    String(
+      getDashboardRangeDaysFromFilters(props.currentFilters) ??
+        props.preferences.defaultTimeRangeDays
+    )
+  )
+  const [customDaysError, setCustomDaysError] = useState<string | null>(null)
+
+  const { data: earliestCreatedAt, isLoading: earliestLoading } = useQuery({
+    queryKey: ['dashboard', 'quota-earliest'],
+    queryFn: () => getEarliestQuotaDataTime(),
+    enabled: open && isAdmin,
+    select: (res) => (res.success ? Number(res.data?.created_at) || 0 : 0),
+    staleTime: 60_000,
+  })
+  const maxCustomDays = getMaxDashboardRangeDays(earliestCreatedAt)
+
+  useEffect(() => {
+    if (!open || !isAdmin || !earliestCreatedAt) return
+    setCustomDays((prev) => {
+      const days = Number(prev)
+      if (!Number.isInteger(days) || days <= maxCustomDays) return prev
+      return String(maxCustomDays)
+    })
+  }, [earliestCreatedAt, isAdmin, maxCustomDays, open])
 
   const handleOpenChange = (nextOpen: boolean) => {
     // Sync the editing state from the applied filters every time the dialog
@@ -117,6 +152,13 @@ export function ModelsFilter(props: ModelsFilterProps) {
         props.currentFilters ?? buildDefaultDashboardFilters(props.preferences)
       setFilters(applied)
       setSelectedRange(detectQuickRangeDays(applied))
+      setCustomDays(
+        String(
+          getDashboardRangeDaysFromFilters(applied) ??
+            props.preferences.defaultTimeRangeDays
+        )
+      )
+      setCustomDaysError(null)
     }
     setOpen(nextOpen)
   }
@@ -139,6 +181,8 @@ export function ModelsFilter(props: ModelsFilterProps) {
       end_timestamp: end,
     })
     setSelectedRange(days)
+    setCustomDays(String(days))
+    setCustomDaysError(null)
     props.onReset()
     setOpen(false)
   }
@@ -148,8 +192,9 @@ export function ModelsFilter(props: ModelsFilterProps) {
     value: Date | string | undefined
   ) => {
     setFilters((prev) => ({ ...prev, [field]: value }))
-    if (field === 'start_timestamp' || field === 'end_timestamp')
+    if (field === 'start_timestamp' || field === 'end_timestamp') {
       setSelectedRange(null)
+    }
   }
 
   const handleQuickRange = (days: number) => {
@@ -162,6 +207,25 @@ export function ModelsFilter(props: ModelsFilterProps) {
       time_granularity: granularityForRangeDays(days),
     }))
     setSelectedRange(days)
+    setCustomDays(String(days))
+    setCustomDaysError(null)
+  }
+
+  const handleCustomDaysChange = (value: string) => {
+    setCustomDays(value.replaceAll(/\D/g, ''))
+    setCustomDaysError(null)
+  }
+
+  const handleCustomDaysApply = () => {
+    const parsedDays = Number(customDays)
+    if (!Number.isInteger(parsedDays) || parsedDays <= 0) {
+      setCustomDaysError(t('Enter a positive number of days'))
+      return
+    }
+
+    const days = Math.min(parsedDays, maxCustomDays)
+    setCustomDays(String(days))
+    handleQuickRange(days)
   }
 
   return (
@@ -180,7 +244,7 @@ export function ModelsFilter(props: ModelsFilterProps) {
           'Filter the model analytics view by time range and user.'
       )}
       contentClassName='max-sm:h-dvh max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:p-4 sm:max-w-lg'
-      contentHeight='min(48vh, 460px)'
+      contentHeight='min(54vh, 520px)'
       footerClassName='grid grid-cols-2 gap-2 sm:flex'
       footer={
         <>
@@ -221,6 +285,47 @@ export function ModelsFilter(props: ModelsFilterProps) {
                 </Button>
               ))}
             </div>
+            {isAdmin && (
+              <Field data-invalid={Boolean(customDaysError)}>
+                <FieldLabel htmlFor='custom_recent_days'>
+                  {t('Recent days')}
+                </FieldLabel>
+                <div className='flex flex-col gap-2 sm:flex-row'>
+                  <Input
+                    id='custom_recent_days'
+                    type='number'
+                    inputMode='numeric'
+                    min={1}
+                    max={maxCustomDays}
+                    value={customDays}
+                    disabled={earliestLoading}
+                    onChange={(event) =>
+                      handleCustomDaysChange(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') handleCustomDaysApply()
+                    }}
+                    aria-invalid={Boolean(customDaysError)}
+                    className='sm:w-32'
+                  />
+                  <Button
+                    type='button'
+                    size='sm'
+                    variant='outline'
+                    disabled={earliestLoading}
+                    onClick={handleCustomDaysApply}
+                    className='shrink-0'
+                  >
+                    <Calendar data-icon='inline-start' />
+                    {t('Apply')}
+                  </Button>
+                </div>
+                <FieldDescription>
+                  {t('Up to {{count}} days', { count: maxCustomDays })}
+                </FieldDescription>
+                {customDaysError && <FieldError>{customDaysError}</FieldError>}
+              </Field>
+            )}
           </div>
 
           <SectionDivider label={t('Custom Time Range')} />
@@ -255,12 +360,10 @@ export function ModelsFilter(props: ModelsFilterProps) {
           <div className='grid gap-2'>
             <Label htmlFor='time_granularity'>{t('Time Granularity')}</Label>
             <Select
-              items={[
-                ...TIME_GRANULARITY_OPTIONS.map((option) => ({
-                  value: option.value,
-                  label: t(option.label),
-                })),
-              ]}
+              items={TIME_GRANULARITY_OPTIONS.map((option) => ({
+                value: option.value,
+                label: t(option.label),
+              }))}
               value={filters.time_granularity}
               onValueChange={(value) =>
                 handleChange('time_granularity', value as TimeGranularity)

@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+
 import type {
   FlowQuotaDataItem,
   HistoricalTokenStats,
@@ -48,6 +49,15 @@ export async function getUserQuotaDates(
     endpoint,
     { params }
   )
+  return res.data
+}
+
+export async function getEarliestQuotaDataTime(params?: { username?: string }) {
+  const res = await api.get<{
+    success: boolean
+    data?: { created_at?: number }
+    message?: string
+  }>('/api/data/earliest', { params })
   return res.data
 }
 

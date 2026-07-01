@@ -23,6 +23,7 @@ export const DASHBOARD_CHART_PREFERENCES_STORAGE_KEY =
   'dashboard_models_chart_preferences'
 export const DEFAULT_TIME_GRANULARITY = 'hour' as const
 export const MAX_CHART_TREND_POINTS = 7
+export const DASHBOARD_RANGE_FALLBACK_DAYS = 29
 
 export const DEFAULT_DASHBOARD_CHART_PREFERENCES: DashboardChartPreferences = {
   consumptionDistributionChart: 'bar',

@@ -181,3 +181,19 @@ func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaDat
 	err = DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime).Group("model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
+
+func GetEarliestQuotaDataTime(username string) (int64, error) {
+	var createdAt []int64
+	query := DB.Table("quota_data")
+	if username != "" {
+		query = query.Where("username = ?", username)
+	}
+	err := query.Order("created_at ASC").Limit(1).Pluck("created_at", &createdAt).Error
+	if err != nil {
+		return 0, err
+	}
+	if len(createdAt) == 0 {
+		return 0, nil
+	}
+	return createdAt[0], nil
+}

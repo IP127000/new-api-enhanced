@@ -17,6 +17,14 @@ type flowQuotaResponse struct {
 	Data    []model.FlowQuotaData `json:"data"`
 }
 
+type earliestQuotaResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	Data    struct {
+		CreatedAt int64 `json:"created_at"`
+	} `json:"data"`
+}
+
 func setupFlowControllerTestDB(t *testing.T) {
 	t.Helper()
 	db := setupModelListControllerTestDB(t)
@@ -78,6 +86,33 @@ func TestGetAllFlowQuotaDatesUsesAdminDimensions(t *testing.T) {
 	require.Equal(t, "east", payload.Data[0].ChannelName)
 	require.Empty(t, payload.Data[0].TokenName)
 	require.Empty(t, payload.Data[0].NodeName)
+}
+
+func TestGetEarliestQuotaDataTimeScopesByUsername(t *testing.T) {
+	setupFlowControllerTestDB(t)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/earliest", nil)
+
+	GetEarliestQuotaDataTime(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var payload earliestQuotaResponse
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success, payload.Message)
+	require.Equal(t, int64(1100), payload.Data.CreatedAt)
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/data/earliest?username=bob", nil)
+
+	GetEarliestQuotaDataTime(ctx)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &payload))
+	require.True(t, payload.Success, payload.Message)
+	require.Equal(t, int64(1200), payload.Data.CreatedAt)
 }
 
 func TestGetAllFlowQuotaDatesUsesRootDimensions(t *testing.T) {

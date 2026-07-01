@@ -16,14 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
 import {
   DASHBOARD_CHART_PREFERENCES_STORAGE_KEY,
+  DASHBOARD_RANGE_FALLBACK_DAYS,
   DEFAULT_DASHBOARD_CHART_PREFERENCES,
   DEFAULT_TIME_GRANULARITY,
   EMPTY_DASHBOARD_FILTERS,
   TIME_GRANULARITY_STORAGE_KEY,
-  TIME_RANGE_PRESETS,
   TIME_RANGE_BY_GRANULARITY,
 } from '@/features/dashboard/constants'
 import type {
@@ -32,6 +31,9 @@ import type {
   DashboardFilters,
   ModelAnalyticsChartTab,
 } from '@/features/dashboard/types'
+import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
+
+const MILLISECONDS_PER_DAY = 86_400_000
 
 function isTimeGranularity(value: unknown): value is TimeGranularity {
   return value === 'hour' || value === 'day' || value === 'week'
@@ -55,8 +57,8 @@ function isModelAnalyticsChartTab(
   return value === 'trend' || value === 'proportion' || value === 'top'
 }
 
-function isTimeRangePresetDays(value: unknown): value is number {
-  return TIME_RANGE_PRESETS.some((preset) => preset.days === value)
+function isTimeRangeDays(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
 export function cleanFilters<T extends Record<string, unknown>>(
@@ -113,7 +115,7 @@ export function getSavedChartPreferences(): DashboardChartPreferences {
       modelAnalyticsChart: isModelAnalyticsChartTab(parsed.modelAnalyticsChart)
         ? parsed.modelAnalyticsChart
         : fallbackPreferences.modelAnalyticsChart,
-      defaultTimeRangeDays: isTimeRangePresetDays(parsed.defaultTimeRangeDays)
+      defaultTimeRangeDays: isTimeRangeDays(parsed.defaultTimeRangeDays)
         ? parsed.defaultTimeRangeDays
         : fallbackPreferences.defaultTimeRangeDays,
       defaultTimeGranularity: isTimeGranularity(parsed.defaultTimeGranularity)
@@ -138,6 +140,34 @@ export function saveChartPreferences(
 export function getDefaultDays(granularity?: TimeGranularity): number {
   if (!granularity) return getSavedChartPreferences().defaultTimeRangeDays
   return TIME_RANGE_BY_GRANULARITY[getSavedGranularity(granularity)]
+}
+
+export function getDashboardRangeDaysFromFilters(
+  filters: DashboardFilters | undefined
+): number | null {
+  const start = filters?.start_timestamp
+  const end = filters?.end_timestamp
+  if (!start || !end) return null
+
+  const days = Math.round(
+    (end.getTime() - start.getTime()) / MILLISECONDS_PER_DAY
+  )
+  return Number.isFinite(days) && days > 0 ? days : null
+}
+
+export function getMaxDashboardRangeDays(
+  earliestCreatedAt: number | null | undefined
+): number {
+  if (!earliestCreatedAt || earliestCreatedAt <= 0) {
+    return DASHBOARD_RANGE_FALLBACK_DAYS
+  }
+
+  const days = Math.ceil(
+    (Date.now() - earliestCreatedAt * 1000) / MILLISECONDS_PER_DAY
+  )
+  return Number.isFinite(days)
+    ? Math.max(1, days)
+    : DASHBOARD_RANGE_FALLBACK_DAYS
 }
 
 export function buildDefaultDashboardFilters(
