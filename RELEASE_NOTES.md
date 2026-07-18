@@ -204,6 +204,40 @@ Operational rollback on July 19:
   review and a new test build;
 - no database rollback or schema change was needed.
 
+### 2026-07-19 Codex Multi-Agent Stream Preemption Fix
+
+The high `client_gone` count was separated from the request-body memory issue.
+Codex multi-agent v2 can intentionally abandon an in-flight Responses stream
+when mailbox input arrives after a completed reasoning or assistant commentary
+item. This happens before `response.completed`, so immediately closing the
+upstream loses the authoritative input/output/cache usage even though the Codex
+turn continues normally with a follow-up request.
+
+The Responses relay now handles that client behavior without restoring the
+large event queue or long-lived request-body retention:
+
+- only `APITypeCodex` + `ChannelTypeCodex` Responses streams receive a bounded
+  two-second terminal grace after downstream cancellation;
+- reasoning and assistant-commentary output items mark a following Codex client
+  close as an expected handler stop, matching the existing function-call close
+  handling;
+- no additional events are written after the downstream context is cancelled;
+- a trailing `response.completed` is still decoded during the grace period so
+  prompt, completion and cached-token usage can be recorded;
+- a silent or still-generating upstream is closed when the two-second grace
+  expires, so abandoned requests cannot leave a goroutine or response body
+  running indefinitely;
+- Responses event handoff remains synchronous, preserving the memory bound;
+- all non-Codex and non-Responses streams retain immediate client-disconnect
+  cleanup;
+- per-write SSE deadlines are cleared after each data or ping write. The rc.21
+  implementation left the deadline installed, which could turn a single-write
+  timeout into a later HTTP/2 stream reset.
+
+The official Codex client expects `response.completed` for token usage, and its
+turn-scoped `x-codex-turn-state` is required for sticky routing. Do not remove
+that response/request header synchronization as a latency workaround.
+
 Relevant files:
 
 - `controller/relay.go`

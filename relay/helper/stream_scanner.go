@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -75,6 +76,27 @@ func ExtendWriteDeadline(c *gin.Context) {
 	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
 }
 
+// ClearWriteDeadline removes the per-write deadline after a stream write has
+// completed. Leaving the deadline installed turns a single-write timeout into
+// an idle-stream timeout and can reset a healthy HTTP/2 stream later.
+func ClearWriteDeadline(c *gin.Context) {
+	if c == nil || c.Writer == nil {
+		return
+	}
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Time{})
+}
+
+type StreamScannerOptions struct {
+	// DataBufferSize controls the number of complete SSE payloads queued between
+	// the upstream scanner and the data handler. Zero uses synchronous handoff.
+	DataBufferSize int
+	// ClientGoneGracePeriod keeps reading the upstream briefly after an expected
+	// client cancellation. It is intended for protocols whose terminal usage
+	// event can immediately trail the event that caused client-side preemption.
+	// No downstream writes should be attempted during this grace.
+	ClientGoneGracePeriod time.Duration
+}
+
 func setClientGoneEndReason(c *gin.Context, status *relaycommon.StreamStatus) {
 	if status != nil && status.IsClientCloseExpected() {
 		status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, nil)
@@ -84,20 +106,32 @@ func setClientGoneEndReason(c *gin.Context, status *relaycommon.StreamStatus) {
 }
 
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
-	streamScannerHandler(c, resp, info, defaultStreamDataBufferSize, dataHandler)
+	StreamScannerHandlerWithOptions(c, resp, info, StreamScannerOptions{
+		DataBufferSize: defaultStreamDataBufferSize,
+	}, dataHandler)
 }
 
 // StreamScannerHandlerWithDataBufferSize lets memory-sensitive stream formats
 // opt into a smaller queue without changing the established buffering behavior
 // of every other relay format. A size of zero uses synchronous handoff.
 func StreamScannerHandlerWithDataBufferSize(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, dataHandler func(data string, sr *StreamResult)) {
+	StreamScannerHandlerWithOptions(c, resp, info, StreamScannerOptions{
+		DataBufferSize: dataBufferSize,
+	}, dataHandler)
+}
+
+func StreamScannerHandlerWithOptions(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, options StreamScannerOptions, dataHandler func(data string, sr *StreamResult)) {
+	dataBufferSize := options.DataBufferSize
 	if dataBufferSize < 0 {
 		dataBufferSize = 0
 	}
-	streamScannerHandler(c, resp, info, dataBufferSize, dataHandler)
+	if options.ClientGoneGracePeriod < 0 {
+		options.ClientGoneGracePeriod = 0
+	}
+	streamScannerHandler(c, resp, info, dataBufferSize, options.ClientGoneGracePeriod, dataHandler)
 }
 
-func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, dataHandler func(data string, sr *StreamResult)) {
+func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, clientGoneGracePeriod time.Duration, dataHandler func(data string, sr *StreamResult)) {
 
 	if resp == nil || dataHandler == nil {
 		return
@@ -117,12 +151,21 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		wg          sync.WaitGroup // 用于等待所有 goroutine 退出
 		cleanupOnce sync.Once
 		stopOnce    sync.Once
+		clientGone  atomic.Bool
 	)
 
 	stop := func() {
 		stopOnce.Do(func() {
 			close(stopChan)
 		})
+	}
+	observeClientGone := func() bool {
+		setClientGoneEndReason(c, info.StreamStatus)
+		if clientGoneGracePeriod <= 0 || !info.StreamStatus.IsClientCloseExpected() {
+			return true
+		}
+		clientGone.Store(true)
+		return false
 	}
 
 	generalSettings := operation_setting.GetGeneralSetting()
@@ -194,6 +237,7 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 						writeMutex.Lock()
 						defer writeMutex.Unlock()
 						ExtendWriteDeadline(c)
+						defer ClearWriteDeadline(c)
 						err = PingData(c)
 					}()
 					if err != nil {
@@ -236,6 +280,7 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				writeMutex.Lock()
 				defer writeMutex.Unlock()
 				ExtendWriteDeadline(c)
+				defer ClearWriteDeadline(c)
 				dataHandler(data, sr)
 			}()
 			if sr.IsStopped() {
@@ -260,14 +305,19 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 		for scanner.Scan() {
 			// 检查是否需要停止
+			var requestDone <-chan struct{}
+			if !clientGone.Load() {
+				requestDone = c.Request.Context().Done()
+			}
 			select {
 			case <-stopChan:
 				return
 			case <-ctx.Done():
 				return
-			case <-c.Request.Context().Done():
-				setClientGoneEndReason(c, info.StreamStatus)
-				return
+			case <-requestDone:
+				if observeClientGone() {
+					return
+				}
 			default:
 			}
 
@@ -290,16 +340,25 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
 
-				select {
-				case dataChan <- data:
-				case <-ctx.Done():
-					return
-				case <-stopChan:
-					return
-				case <-c.Request.Context().Done():
-					setClientGoneEndReason(c, info.StreamStatus)
-					return
+				for {
+					requestDone = nil
+					if !clientGone.Load() {
+						requestDone = c.Request.Context().Done()
+					}
+					select {
+					case dataChan <- data:
+						goto dataSent
+					case <-ctx.Done():
+						return
+					case <-stopChan:
+						return
+					case <-requestDone:
+						if observeClientGone() {
+							return
+						}
+					}
 				}
+			dataSent:
 			} else {
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				logger.LogDebug(c, "received [DONE], stopping scanner")
@@ -325,7 +384,20 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	case <-stopChan:
 		// EndReason already set by the goroutine that triggered stopChan
 	case <-c.Request.Context().Done():
-		setClientGoneEndReason(c, info.StreamStatus)
+		if observeClientGone() {
+			break
+		}
+		graceTimer := time.NewTimer(clientGoneGracePeriod)
+		select {
+		case <-stopChan:
+		case <-graceTimer.C:
+		}
+		if !graceTimer.Stop() {
+			select {
+			case <-graceTimer.C:
+			default:
+			}
+		}
 	}
 
 	cleanup()

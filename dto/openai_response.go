@@ -458,7 +458,9 @@ type ResponsesBillingOutput struct {
 }
 
 type ResponsesBillingItem struct {
-	Type string `json:"type"`
+	Type  string `json:"type"`
+	Role  string `json:"role,omitempty"`
+	Phase string `json:"phase,omitempty"`
 }
 
 func (r *ResponsesBillingResponse) ImageGenerationCall() (quality string, size string, ok bool) {

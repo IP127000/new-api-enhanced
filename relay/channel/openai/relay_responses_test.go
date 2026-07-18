@@ -141,6 +141,96 @@ func TestOaiResponsesStreamHandlerTreatsFunctionCallClientCloseAsExpected(t *tes
 	require.True(t, info.StreamStatus.IsNormalEnd())
 }
 
+func TestOaiResponsesStreamHandlerCapturesUsageAfterCodexMailboxPreemption(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	reqCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
+	c.Writer = &cancelAfterWriter{
+		ResponseWriter: c.Writer,
+		needle:         `"type":"reasoning"`,
+		cancel:         cancel,
+	}
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       pr,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+	}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			UpstreamModelName: "gpt-test",
+			ApiType:           constant.APITypeCodex,
+			ChannelType:       constant.ChannelTypeCodex,
+		},
+		IsStream:    true,
+		RelayFormat: types.RelayFormatOpenAIResponses,
+		DisablePing: true,
+	}
+
+	type result struct {
+		usage *dto.Usage
+		err   *types.NewAPIError
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		usage, err := OaiResponsesStreamHandler(c, info, resp)
+		resultCh <- result{usage: usage, err: err}
+	}()
+
+	_, writeErr := fmt.Fprint(pw, "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\"}}\n")
+	require.NoError(t, writeErr)
+	require.Eventually(t, func() bool {
+		return reqCtx.Err() != nil && info.StreamStatus != nil && info.StreamStatus.IsClientCloseExpected()
+	}, 2*time.Second, 10*time.Millisecond)
+
+	_, writeErr = fmt.Fprint(pw, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":200000,\"output_tokens\":12,\"total_tokens\":200012,\"input_tokens_details\":{\"cached_tokens\":150000}}}}\n")
+	require.NoError(t, writeErr)
+
+	select {
+	case res := <-resultCh:
+		require.Nil(t, res.err)
+		require.NotNil(t, res.usage)
+		require.Equal(t, 200000, res.usage.PromptTokens)
+		require.Equal(t, 12, res.usage.CompletionTokens)
+		require.Equal(t, 200012, res.usage.TotalTokens)
+		require.Equal(t, 150000, res.usage.PromptTokensDetails.CachedTokens)
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for terminal usage grace")
+	}
+
+	require.Equal(t, relaycommon.StreamEndReasonHandlerStop, info.StreamStatus.EndReason)
+	require.Contains(t, recorder.Body.String(), `"type":"reasoning"`)
+	require.NotContains(t, recorder.Body.String(), `"type":"response.completed"`)
+}
+
+func TestIsCodexMailboxPreemptionPoint(t *testing.T) {
+	tests := []struct {
+		name string
+		item *dto.ResponsesBillingItem
+		want bool
+	}{
+		{name: "reasoning", item: &dto.ResponsesBillingItem{Type: "reasoning"}, want: true},
+		{name: "assistant commentary", item: &dto.ResponsesBillingItem{Type: "message", Role: "assistant", Phase: "commentary"}, want: true},
+		{name: "assistant final", item: &dto.ResponsesBillingItem{Type: "message", Role: "assistant", Phase: "final"}},
+		{name: "custom tool", item: &dto.ResponsesBillingItem{Type: "custom_tool_call"}},
+		{name: "nil", item: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, isCodexMailboxPreemptionPoint(tt.item))
+		})
+	}
+}
+
 func TestOaiResponsesStreamHandlerWriteFailureClosesUpstream(t *testing.T) {
 	oldTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 30

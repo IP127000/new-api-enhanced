@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -18,6 +19,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
+
+const codexTerminalUsageGracePeriod = 2 * time.Second
 
 func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
 	defer service.CloseResponseBodyGracefully(resp)
@@ -81,6 +84,10 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	var usage = &dto.Usage{}
 	var responseTextBuilder strings.Builder
+	isCodexResponsesStream := info != nil && info.ChannelMeta != nil &&
+		info.RelayFormat == types.RelayFormatOpenAIResponses &&
+		info.ApiType == constant.APITypeCodex &&
+		info.ChannelType == constant.ChannelTypeCodex
 	collectFallbackOutput := !(operation_setting.SelfUseModeEnabled &&
 		info != nil && info.ChannelMeta != nil &&
 		info.RelayFormat == types.RelayFormatOpenAIResponses &&
@@ -91,7 +98,15 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	// synchronous handoff only for this format so concurrent large-context
 	// sessions cannot queue ten multi-MiB events each; other stream formats keep
 	// StreamScannerHandler's established buffering behavior.
-	helper.StreamScannerHandlerWithDataBufferSize(c, resp, info, 0, func(data string, sr *helper.StreamResult) {
+	scannerOptions := helper.StreamScannerOptions{DataBufferSize: 0}
+	if isCodexResponsesStream {
+		// Codex multi-agent v2 can preempt a request after a completed reasoning
+		// or commentary item when mailbox input arrives, before the immediately
+		// following response.completed event. Keep the upstream alive very briefly
+		// to capture authoritative usage without retaining a queue of large events.
+		scannerOptions.ClientGoneGracePeriod = codexTerminalUsageGracePeriod
+	}
+	helper.StreamScannerHandlerWithOptions(c, resp, info, scannerOptions, func(data string, sr *helper.StreamResult) {
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
 		var streamResponse dto.ResponsesBillingStreamResponse
@@ -133,9 +148,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				responseTextBuilder.WriteString(streamResponse.Delta)
 			}
 		case dto.ResponsesOutputTypeItemDone:
-			// 函数调用处理
+			// Codex can intentionally preempt the current stream when multi-agent
+			// mailbox input arrives after a reasoning/commentary item. Treat the
+			// resulting downstream cancellation like the established function-call
+			// close path rather than a network failure.
 			if streamResponse.Item != nil {
-				if streamResponse.Item.Type == "function_call" && info != nil && info.StreamStatus != nil {
+				if info != nil && info.StreamStatus != nil &&
+					(streamResponse.Item.Type == "function_call" ||
+						(isCodexResponsesStream && isCodexMailboxPreemptionPoint(streamResponse.Item))) {
 					info.StreamStatus.MarkClientCloseExpected()
 				}
 				switch streamResponse.Item.Type {
@@ -156,15 +176,27 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			}
 		}
 
-		if err := sendResponsesStreamData(c, streamResponse.Type, data); err != nil {
-			// Usage from response.completed has already been captured above. A
-			// failed downstream write means no consumer remains, so stop immediately
-			// and let StreamScannerHandler close the upstream body.
-			if info != nil && info.StreamStatus != nil {
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
+		downstreamGone := c.Request != nil && c.Request.Context().Err() != nil
+		if !downstreamGone {
+			if err := sendResponsesStreamData(c, streamResponse.Type, data); err != nil {
+				expectedCancelDuringWrite := isCodexResponsesStream && c.Request.Context().Err() != nil &&
+					info.StreamStatus != nil && info.StreamStatus.IsClientCloseExpected()
+				if expectedCancelDuringWrite {
+					// The client cancelled while this preemption-point event was being
+					// flushed. Let the scanner's bounded grace read only the terminal
+					// usage event instead of treating the expected cancel as a write
+					// failure and closing the upstream immediately.
+				} else {
+					// Usage from response.completed has already been captured above. A
+					// failed downstream write means no consumer remains, so stop immediately
+					// and let StreamScannerHandler close the upstream body.
+					if info != nil && info.StreamStatus != nil {
+						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
+					}
+					sr.Stop(err)
+					return
+				}
 			}
-			sr.Stop(err)
-			return
 		}
 		if completed {
 			// response.completed is the semantic terminal event for Responses SSE.
@@ -191,4 +223,14 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
 
 	return usage, nil
+}
+
+func isCodexMailboxPreemptionPoint(item *dto.ResponsesBillingItem) bool {
+	if item == nil {
+		return false
+	}
+	if item.Type == "reasoning" {
+		return true
+	}
+	return item.Type == "message" && item.Role == "assistant" && item.Phase == "commentary"
 }
