@@ -267,6 +267,16 @@ Diagnostic logging deployment completed later on July 19:
   expected-close state, grace start/end/expiry, terminal usage, upstream body
   close, and final stream reason without logging request or response payloads.
 
+Operator rollback later on July 19:
+
+- the diagnostic build was removed from the public Caddy route after the
+  operator observed rapid RSS growth during testing;
+- public traffic is back on `new-api:20260719-preempt` /
+  `new-api-20260719-preempt` at `127.0.0.1:3027`;
+- `new-api:20260719-diag` remains stopped with its diagnostic log for review;
+- no database schema, migration, or statistics change was made during the
+  rollback.
+
 Relevant files:
 
 - `controller/relay.go`
