@@ -173,132 +173,19 @@ The optimization does not change original-body forwarding, Codex subscription
 authentication headers, function-call terminal handling, `previous_response_id`,
 or cache token fields.
 
-Follow-up production deployment completed on July 18:
+Production deployment completed on July 18:
 
-- source commit: `3cf170a1`;
-- current image/container: `new-api:20260718-uploadfree` /
-  `new-api-20260718-uploadfree`;
-- current version: `v1.0.0-rc.21-uploadfree-20260718`;
-- current Caddy target: `127.0.0.1:3026`;
+- current image/container: `new-api:20260718-rootfix` /
+  `new-api-20260718-rootfix`;
+- current Caddy target: `127.0.0.1:3025`;
 - runtime memory limit: `GOMEMLIMIT=768MiB`;
-- runtime node type remains `NODE_TYPE=slave`;
 - request-body disk caching is enabled with the existing 10 MiB threshold and
   1 GiB cache limit, so larger bodies spill to temporary files without changing
   their contents;
 - online SQLite backup before the setting change:
   `/opt/new-api/backups/one-api-before-rootfix-20260718-1746.db`;
-- rollback image/container: `new-api:20260718-rootfix` /
-  `new-api-20260718-rootfix` (kept stopped);
-- the superseded July 17 rollback container/image was removed after public
-  health verification.
-
-Operational rollback on July 19:
-
-- the `uploadfree` build was rolled back after the operator reported serious
-  runtime problems during client testing;
-- current image/container: `new-api:20260718-rootfix` /
-  `new-api-20260718-rootfix`;
-- current Caddy target: `127.0.0.1:3025`;
-- `new-api:20260718-uploadfree` / `new-api-20260718-uploadfree` is kept stopped
-  for investigation and must not be returned to production without a root-cause
-  review and a new test build;
-- no database rollback or schema change was needed.
-
-### 2026-07-19 Codex Multi-Agent Stream Preemption Fix
-
-The high `client_gone` count was separated from the request-body memory issue.
-Codex multi-agent v2 can intentionally abandon an in-flight Responses stream
-when mailbox input arrives after a completed reasoning or assistant commentary
-item. This happens before `response.completed`, so immediately closing the
-upstream loses the authoritative input/output/cache usage even though the Codex
-turn continues normally with a follow-up request.
-
-The Responses relay now handles that client behavior without restoring the
-large event queue or long-lived request-body retention:
-
-- only `APITypeCodex` + `ChannelTypeCodex` Responses streams receive a bounded
-  two-second terminal grace after downstream cancellation;
-- reasoning and assistant-commentary output items mark a following Codex client
-  close as an expected handler stop, matching the existing function-call close
-  handling;
-- no additional events are written after the downstream context is cancelled;
-- a trailing `response.completed` is still decoded during the grace period so
-  prompt, completion and cached-token usage can be recorded;
-- a silent or still-generating upstream is closed when the two-second grace
-  expires, so abandoned requests cannot leave a goroutine or response body
-  running indefinitely;
-- Responses event handoff remains synchronous, preserving the memory bound;
-- all non-Codex and non-Responses streams retain immediate client-disconnect
-  cleanup;
-- per-write SSE deadlines are cleared after each data or ping write. The rc.21
-  implementation left the deadline installed, which could turn a single-write
-  timeout into a later HTTP/2 stream reset.
-
-The official Codex client expects `response.completed` for token usage, and its
-turn-scoped `x-codex-turn-state` is required for sticky routing. Do not remove
-that response/request header synchronization as a latency workaround.
-
-Production deployment completed on July 19:
-
-- source commit: `32383c8a`;
-- current image/container: `new-api:20260719-preempt` /
-  `new-api-20260719-preempt`;
-- current version: `v1.0.0-rc.21-preempt-20260719`;
-- current Caddy target: `127.0.0.1:3027`;
-- runtime memory limit remains `GOMEMLIMIT=768MiB` and node type remains
-  `NODE_TYPE=slave`;
-- the previous `new-api:20260718-rootfix` container is stopped and retained as
-  the immediate rollback while this change is operator-tested;
-- the rejected `uploadfree` container/image and the uploaded image tarball were
-  removed after the public health check passed.
-
-Diagnostic logging deployment completed later on July 19:
-
-- source changes: `relay/helper/stream_scanner.go` and
-  `relay/channel/openai/relay_responses.go`;
-- current image/container: `new-api:20260719-diag` /
-  `new-api-20260719-diag`;
-- current version: `v1.0.0-rc.21-diag-20260719`;
-- current Caddy target: `127.0.0.1:3028`;
-- diagnostics are written only to the existing application/container logs;
-  this change adds no database tables, columns, indexes, migrations, or
-  statistics writes;
-- logs correlate request ID, upstream request ID, context error, write error,
-  expected-close state, grace start/end/expiry, terminal usage, upstream body
-  close, and final stream reason without logging request or response payloads.
-
-Operator rollback later on July 19:
-
-- the diagnostic build was removed from the public Caddy route after the
-  operator observed rapid RSS growth during testing;
-- public traffic is back on `new-api:20260719-preempt` /
-  `new-api-20260719-preempt` at `127.0.0.1:3027`;
-- `new-api:20260719-diag` remains stopped with its diagnostic log for review;
-- no database schema, migration, or statistics change was made during the
-  rollback.
-
-Follow-up memory fix prepared on July 19:
-
-- Codex Responses now uses a per-stream inline scanner/handler path; it does
-  not serialize separate HTTP requests or conversations;
-- the scanner cannot read the next complete SSE event until the current large
-  event has been parsed and forwarded, removing the previous read-ahead
-  overlap between the scanner goroutine and handler goroutine;
-- the Codex Responses handler consumes `scanner.Bytes()` directly and writes
-  the payload as bytes, eliminating the additional full-event allocation made
-  by `scanner.Text()`;
-- all other stream formats retain their existing buffered handler path;
-- no database schema, migration, or statistics write was added.
-
-Production deployment completed on July 19:
-
-- source commit: `a9afc748`;
-- current image/container: `new-api:20260719-bytes` /
-  `new-api-20260719-bytes`;
-- current version: `v1.0.0-rc.21-bytes-20260719`;
-- current Caddy target: `127.0.0.1:3030`;
-- the superseded `inline`, `preempt`, `diag`, and `rootfix` containers are
-  stopped while the operator validates the byte-stream path.
+- rollback image/container: `new-api:20260717-rc21-codex-4a7f1cb8` /
+  `new-api-20260717-rollback` (kept stopped).
 
 Relevant files:
 
@@ -567,8 +454,8 @@ Current server naming convention:
 - current image: `new-api:20260718-rootfix`
 - current container: `new-api-20260718-rootfix`
 - current Caddy target: `127.0.0.1:3025`
-- investigation image: `new-api:20260718-uploadfree`
-- investigation container: `new-api-20260718-uploadfree` (stopped)
+- rollback image: `new-api:20260717-rc21-codex-4a7f1cb8`
+- rollback container: `new-api-20260717-rollback`
 
 Image/container names should stay short: `new-api` + date + one word.
 
