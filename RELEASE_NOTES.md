@@ -238,6 +238,20 @@ The official Codex client expects `response.completed` for token usage, and its
 turn-scoped `x-codex-turn-state` is required for sticky routing. Do not remove
 that response/request header synchronization as a latency workaround.
 
+Production deployment completed on July 19:
+
+- source commit: `32383c8a`;
+- current image/container: `new-api:20260719-preempt` /
+  `new-api-20260719-preempt`;
+- current version: `v1.0.0-rc.21-preempt-20260719`;
+- current Caddy target: `127.0.0.1:3027`;
+- runtime memory limit remains `GOMEMLIMIT=768MiB` and node type remains
+  `NODE_TYPE=slave`;
+- the previous `new-api:20260718-rootfix` container is stopped and retained as
+  the immediate rollback while this change is operator-tested;
+- the rejected `uploadfree` container/image and the uploaded image tarball were
+  removed after the public health check passed.
+
 Relevant files:
 
 - `controller/relay.go`
