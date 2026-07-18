@@ -1,21 +1,28 @@
 package helper
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	appconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dto.Request, err error) {
@@ -142,21 +149,147 @@ func exceedsMaxTokensLimit(values ...*uint) bool {
 }
 
 func GetAndValidateResponsesRequest(c *gin.Context) (*dto.OpenAIResponsesRequest, error) {
+	if shouldUseMinimalCodexResponsesRequest(c) {
+		return getAndValidateMinimalCodexResponsesRequest(c)
+	}
 	request := &dto.OpenAIResponsesRequest{}
 	err := common.UnmarshalBodyReusable(c, request)
 	if err != nil {
 		return nil, err
 	}
-	if request.Model == "" {
-		return nil, errors.New("model is required")
-	}
-	if request.Input == nil {
-		return nil, errors.New("input is required")
-	}
-	if exceedsMaxTokensLimit(request.MaxOutputTokens) {
-		return nil, errors.New("max_output_tokens is invalid")
+	if err := ValidateResponsesRequest(request); err != nil {
+		return nil, err
 	}
 	return request, nil
+}
+
+// ValidateResponsesRequest validates the small set of fields that the relay
+// requires before selecting and invoking an upstream Responses channel.
+func ValidateResponsesRequest(request *dto.OpenAIResponsesRequest) error {
+	if request == nil {
+		return errors.New("request is required")
+	}
+	if request.Model == "" {
+		return errors.New("model is required")
+	}
+	if request.Input == nil {
+		return errors.New("input is required")
+	}
+	if exceedsMaxTokensLimit(request.MaxOutputTokens) {
+		return errors.New("max_output_tokens is invalid")
+	}
+	return nil
+}
+
+func shouldUseMinimalCodexResponsesRequest(c *gin.Context) bool {
+	if c == nil || !operation_setting.SelfUseModeEnabled || setting.ShouldCheckPromptSensitive() {
+		return false
+	}
+	channelType := common.GetContextKeyInt(c, appconstant.ContextKeyChannelType)
+	apiType, ok := common.ChannelType2APIType(channelType)
+	return ok && apiType == appconstant.APITypeCodex && channelType == appconstant.ChannelTypeCodex
+}
+
+// getAndValidateMinimalCodexResponsesRequest builds only the request shell
+// needed by model mapping, streaming and built-in-tool accounting. The original
+// JSON body remains authoritative and is forwarded verbatim by ResponsesHelper.
+// In particular, large input and function schemas are never copied into
+// json.RawMessage fields.
+func getAndValidateMinimalCodexResponsesRequest(c *gin.Context) (*dto.OpenAIResponsesRequest, error) {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return nil, err
+	}
+	body, err := storage.Bytes()
+	if err != nil {
+		return nil, err
+	}
+	fields, err := common.ExtractTopLevelJSONFields(body,
+		"model", "input", "stream", "max_output_tokens", "tools",
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	request := &dto.OpenAIResponsesRequest{}
+	modelJSON, exists := fields["model"]
+	if !exists || bytes.Equal(modelJSON, []byte("null")) {
+		return nil, errors.New("model is required")
+	}
+	if err := json.Unmarshal(modelJSON, &request.Model); err != nil {
+		return nil, fmt.Errorf("model must be a string: %w", err)
+	}
+	if _, exists := fields["input"]; !exists {
+		return nil, errors.New("input is required")
+	}
+	// A tiny non-nil sentinel preserves the existing validation semantics.
+	// The actual input is read only from the original BodyStorage.
+	request.Input = json.RawMessage("true")
+
+	if raw, exists := fields["stream"]; exists && !bytes.Equal(raw, []byte("null")) {
+		var stream bool
+		if err := json.Unmarshal(raw, &stream); err != nil {
+			return nil, fmt.Errorf("stream must be a boolean: %w", err)
+		}
+		request.Stream = &stream
+	}
+	if raw, exists := fields["max_output_tokens"]; exists && !bytes.Equal(raw, []byte("null")) {
+		var maxOutputTokens uint
+		if err := json.Unmarshal(raw, &maxOutputTokens); err != nil {
+			return nil, fmt.Errorf("max_output_tokens is invalid: %w", err)
+		}
+		request.MaxOutputTokens = &maxOutputTokens
+	}
+	if raw, exists := fields["tools"]; exists {
+		request.Tools, err = minimalResponsesTools(raw)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := ValidateResponsesRequest(request); err != nil {
+		return nil, err
+	}
+
+	if _, err := storage.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	c.Request.Body = io.NopCloser(storage)
+	common.SetContextKey(c, appconstant.ContextKeyCodexResponsesMinimalRequest, true)
+	return request, nil
+}
+
+func minimalResponsesTools(raw json.RawMessage) (json.RawMessage, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, nil
+	}
+	type minimalTool struct {
+		Type              string `json:"type"`
+		SearchContextSize string `json:"search_context_size,omitempty"`
+	}
+	tools := make([]minimalTool, 0, 4)
+	err := common.ForEachJSONArrayValue(trimmed, func(toolJSON []byte) bool {
+		toolType := gjson.GetBytes(toolJSON, "type").String()
+		if toolType == "" {
+			return true
+		}
+		tools = append(tools, minimalTool{
+			Type:              toolType,
+			SearchContextSize: gjson.GetBytes(toolJSON, "search_context_size").String(),
+		})
+		return true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("tools is invalid: %w", err)
+	}
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(tools)
+	if err != nil {
+		return nil, err
+	}
+	return encoded, nil
 }
 
 func GetAndValidateResponsesCompactionRequest(c *gin.Context) (*dto.OpenAIResponsesCompactionRequest, error) {

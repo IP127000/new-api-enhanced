@@ -66,6 +66,9 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage ContextKey = "language"
 	ContextKeyIsStream ContextKey = "is_stream"
+	// ContextKeyCodexResponsesMinimalRequest marks the allocation-bounded
+	// request shell used only for self-use Codex original-body forwarding.
+	ContextKeyCodexResponsesMinimalRequest ContextKey = "codex_responses_minimal_request"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

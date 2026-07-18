@@ -106,6 +106,43 @@ the response path:
   metadata is extracted directly from raw JSON without building a generic map
   object graph.
 
+A second production audit on July 18 identified the remaining request-side
+amplification and retention root cause. Preserve these additional changes:
+
+- self-use `APITypeCodex` + `ChannelTypeCodex` Responses validation extracts
+  only model, stream, max-output and minimal built-in-tool metadata from the
+  original JSON; large `input` and function schemas are not copied into
+  `json.RawMessage` fields;
+- compliant Codex bodies (`instructions` present, `store: false`, no unsupported
+  max/temperature fields) are forwarded directly from the original
+  `BodyStorage`; sanitization performs no full-body write and no second outbound
+  memory storage is created;
+- a retry that actually switches away from a Codex channel rehydrates the full
+  DTO only for that non-Codex conversion attempt, preserving mixed-channel
+  compatibility;
+- sensitive-word checking keeps the full request decode path so it still sees
+  the original input/instructions; the minimal shell is used only when prompt
+  sensitive checking is disabled;
+- configured channel model mappings are written into the forwarded Codex JSON;
+  an unmapped, already-compliant body remains the true zero-copy fast path;
+- each zero-copy upstream attempt opens an independent reader cursor, so a retry
+  cannot seek a body reader that a previous HTTP transport may still be closing;
+- closing a memory `BodyStorage` clears its backing slice and reader, cleanup
+  clears both Gin cache keys and `Request.Body`, and cleanup is deferred so
+  panic/abort paths cannot leave a large body referenced by Gin's context pool;
+- streaming image partials use synchronous handoff, do not retain the final raw
+  base64 event, and write the existing string directly without another
+  byte-to-string payload copy;
+- the performance page distinguishes current heap/process RSS from cumulative
+  `TotalAlloc` and runtime-reserved `Sys`, and exposes HeapInuse/HeapReleased.
+
+The production evidence for this root cause was request-body-specific: the
+performance page showed 237.76 MiB across ten active `BodyStorage` buffers while
+the corresponding successful `/v1/responses` rows had zero image-generation
+calls. A 2 MiB allocation regression fixture now parses into the minimal Codex
+request shell with only about 2 KiB allocated; no-op sanitization allocates only
+single-digit bytes rather than another body-sized buffer.
+
 The optimization does not change original-body forwarding, Codex subscription
 authentication headers, function-call terminal handling, `previous_response_id`,
 or cache token fields.
@@ -117,6 +154,13 @@ Relevant files:
 - `relay/channel/openai/relay_responses.go`
 - `relay/helper/common.go`
 - `relay/helper/stream_scanner.go`
+- `relay/helper/valid_request.go`
+- `relay/responses_handler.go`
+- `common/body_storage.go`
+- `common/gin.go`
+- `middleware/body_cleanup.go`
+- `relay/channel/openai/relay_image.go`
+- `controller/performance.go`
 
 ### Failed Channel Retry Cycling
 

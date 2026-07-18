@@ -110,12 +110,12 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 	// "data:" payload, so the SSE "event:" line is rebuilt from the JSON "type"
 	// field (real OpenAI image events keep event == type).
 	usage := &dto.Usage{}
-	var lastStreamData []byte
 	var completedImages int64
 
-	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+	// Image partials can carry multi-MiB base64 payloads. Synchronous handoff
+	// prevents a slow client from retaining the default ten-event queue.
+	helper.StreamScannerHandlerWithDataBufferSize(c, resp, info, 0, func(data string, sr *helper.StreamResult) {
 		raw := common.StringToByteSlice(data)
-		lastStreamData = raw
 		if isOpenAIImageStreamErrorEvent(raw) {
 			// Record the error as a soft error; the scanner drives the final
 			// EndReason. HasErrors() flags the failure for logging/handling.
@@ -128,13 +128,16 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		if err := common.Unmarshal(raw, &chunk); err == nil {
 			normalizeOpenAIUsage(&chunk.Usage)
 			if service.ValidUsage(&chunk.Usage) {
+				// Apply provider-specific fields while the current event is in
+				// scope; never retain a possibly multi-MiB base64 event afterward.
+				applyUsagePostProcessing(info, &chunk.Usage, raw)
 				usage = &chunk.Usage
 			}
 			if chunk.Type == "image_generation.completed" || chunk.Type == "image_edit.completed" {
 				completedImages++
 			}
 		}
-		if err := writeOpenaiImageStreamChunk(c, raw); err != nil {
+		if err := writeOpenaiImageStreamChunk(c, data); err != nil {
 			sr.Stop(err)
 		}
 	})
@@ -145,7 +148,6 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 		helper.Done(c)
 	}
 
-	applyUsagePostProcessing(info, usage, lastStreamData)
 	// Only trust completedImages when upstream finished the stream (done/eof).
 	// On client-side aborts (client_gone, or handler_stop from a failed client
 	// write) the counter undercounts what upstream actually generated and
@@ -170,15 +172,11 @@ func OpenaiImageStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp 
 // writeOpenaiImageStreamChunk rebuilds the SSE frame for an image stream chunk:
 // it emits an "event:" line derived from the JSON "type" field (when present)
 // followed by the verbatim "data:" payload, mirroring helper.ResponseChunkData.
-func writeOpenaiImageStreamChunk(c *gin.Context, data []byte) error {
-	var payload struct {
-		Type string `json:"type"`
+func writeOpenaiImageStreamChunk(c *gin.Context, data string) error {
+	if eventName := strings.TrimSpace(gjson.Get(data, "type").String()); eventName != "" {
+		return helper.ResponseChunkDataByType(c, eventName, data)
 	}
-	_ = common.Unmarshal(data, &payload)
-	if eventName := strings.TrimSpace(payload.Type); eventName != "" {
-		return helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: eventName}, string(data))
-	}
-	return helper.StringData(c, string(data))
+	return helper.StringData(c, data)
 }
 
 // isOpenAIImageStreamErrorEvent detects upstream error chunks by JSON content

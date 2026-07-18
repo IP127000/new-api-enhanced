@@ -14,6 +14,9 @@ import (
 type BodyStorage interface {
 	io.ReadSeeker
 	io.Closer
+	// NewReader opens an independent cursor for one upstream attempt. Closing
+	// it never closes the underlying BodyStorage.
+	NewReader() (io.ReadCloser, error)
 	// Bytes 获取全部内容
 	Bytes() ([]byte, error)
 	// Size 获取数据大小
@@ -32,6 +35,27 @@ type memoryStorage struct {
 	size   int64
 	closed int32
 	mu     sync.Mutex
+}
+
+type memoryStorageReader struct {
+	reader *bytes.Reader
+	mu     sync.Mutex
+}
+
+func (r *memoryStorageReader) Read(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.reader == nil {
+		return 0, ErrStorageClosed
+	}
+	return r.reader.Read(p)
+}
+
+func (r *memoryStorageReader) Close() error {
+	r.mu.Lock()
+	r.reader = nil
+	r.mu.Unlock()
+	return nil
 }
 
 func newMemoryStorage(data []byte) *memoryStorage {
@@ -67,6 +91,12 @@ func (m *memoryStorage) Close() error {
 	defer m.mu.Unlock()
 	if atomic.CompareAndSwapInt32(&m.closed, 0, 1) {
 		DecrementMemoryBuffers(m.size)
+		// A Gin context can remain in its sync.Pool after the request has
+		// completed. Drop the large backing slice here so a stale Request.Body
+		// reference cannot keep the whole payload alive until that context is
+		// checked out again.
+		m.data = nil
+		m.reader = nil
 	}
 	return nil
 }
@@ -78,6 +108,15 @@ func (m *memoryStorage) Bytes() ([]byte, error) {
 		return nil, ErrStorageClosed
 	}
 	return m.data, nil
+}
+
+func (m *memoryStorage) NewReader() (io.ReadCloser, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if atomic.LoadInt32(&m.closed) == 1 {
+		return nil, ErrStorageClosed
+	}
+	return &memoryStorageReader{reader: bytes.NewReader(m.data)}, nil
 }
 
 func (m *memoryStorage) Size() int64 {
@@ -227,6 +266,19 @@ func (d *diskStorage) Bytes() ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+func (d *diskStorage) NewReader() (io.ReadCloser, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if atomic.LoadInt32(&d.closed) == 1 {
+		return nil, ErrStorageClosed
+	}
+	reader, err := os.Open(d.filePath)
+	if err != nil {
+		return nil, err
+	}
+	return reader, nil
 }
 
 func (d *diskStorage) Size() int64 {

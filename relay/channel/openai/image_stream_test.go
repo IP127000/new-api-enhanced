@@ -139,6 +139,30 @@ func TestOpenaiImageStreamHandlerUsesCompletedEventCount(t *testing.T) {
 	require.Equal(t, 2.0, info.PriceData.OtherRatios()["n"])
 }
 
+func TestOpenaiImageStreamHandlerKeepsProviderUsageWithoutRetainingRawEvent(t *testing.T) {
+	oldMode := gin.Mode()
+	gin.SetMode(gin.TestMode)
+	t.Cleanup(func() { gin.SetMode(oldMode) })
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	body := strings.Join([]string{
+		`data: {"type":"image_generation.completed","b64_json":"image","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"timings":{"cache_n":2}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	c, _, resp, info := newImageTestContext(t, body, "text/event-stream", true)
+	info.ChannelType = constant.ChannelTypeOpenAI
+
+	usage, err := OpenaiImageStreamHandler(c, info, resp)
+
+	require.Nil(t, err)
+	require.Equal(t, 7, usage.TotalTokens)
+	require.Equal(t, 2, usage.PromptTokensDetails.CachedTokens)
+}
+
 // blockingBody serves one SSE chunk, then blocks until Close (the scanner's
 // cleanup) and returns EOF — keeping the upstream "open" while the client-side
 // disconnect is simulated elsewhere.

@@ -168,9 +168,12 @@ type PerformanceStats = {
     used_percent: number
   }
   memory_stats?: {
+    rss: number
     alloc: number
     total_alloc: number
     sys: number
+    heap_inuse: number
+    heap_released: number
     num_gc: number
     num_goroutine: number
   }
@@ -647,7 +650,15 @@ export function PerformanceSection(props: Props) {
                 <p className='mb-2 text-sm font-medium'>
                   {t('System Memory Stats')}
                 </p>
-                <div className='grid grid-cols-2 gap-2 text-xs md:grid-cols-5'>
+                <div className='grid grid-cols-2 gap-2 text-xs md:grid-cols-4'>
+                  {stats.memory_stats.rss > 0 && (
+                    <div>
+                      <span className='text-muted-foreground'>
+                        {t('Process RSS')}:
+                      </span>{' '}
+                      {formatBytes(stats.memory_stats.rss)}
+                    </div>
+                  )}
                   <div>
                     <span className='text-muted-foreground'>
                       {t('Allocated Memory')}:
@@ -668,6 +679,18 @@ export function PerformanceSection(props: Props) {
                   </div>
                   <div>
                     <span className='text-muted-foreground'>
+                      {t('Heap In Use')}:
+                    </span>{' '}
+                    {formatBytes(stats.memory_stats.heap_inuse)}
+                  </div>
+                  <div>
+                    <span className='text-muted-foreground'>
+                      {t('Heap Returned')}:
+                    </span>{' '}
+                    {formatBytes(stats.memory_stats.heap_released)}
+                  </div>
+                  <div>
+                    <span className='text-muted-foreground'>
                       {t('GC Count')}:
                     </span>{' '}
                     {stats.memory_stats.num_gc}
@@ -677,6 +700,11 @@ export function PerformanceSection(props: Props) {
                     {stats.memory_stats.num_goroutine}
                   </div>
                 </div>
+                <p className='text-muted-foreground mt-2 text-xs'>
+                  {t(
+                    'Cumulative allocation and runtime-reserved memory are not current process usage. Watch current heap, body cache, and process RSS.'
+                  )}
+                </p>
               </div>
             )}
 

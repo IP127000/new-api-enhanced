@@ -68,6 +68,20 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 
 	useCodexOriginalBody := shouldUseCodexOriginalResponsesBody(info)
+	if !useCodexOriginalBody && common.GetContextKeyBool(c, appconstant.ContextKeyCodexResponsesMinimalRequest) {
+		// The distributor initially selected a Codex channel, but a retry can
+		// move to a different channel type. Rehydrate the complete DTO only for
+		// that exceptional conversion path; Codex original-body attempts remain
+		// allocation-bounded.
+		fullRequest := &dto.OpenAIResponsesRequest{}
+		if err := common.UnmarshalBodyReusable(c, fullRequest); err != nil {
+			return types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		if err := helper.ValidateResponsesRequest(fullRequest); err != nil {
+			return types.NewError(err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		responsesReq = fullRequest
+	}
 	var request *dto.OpenAIResponsesRequest
 	if useCodexOriginalBody {
 		// The Codex path forwards the original stored JSON body. It only needs a
@@ -105,33 +119,59 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
+		bodyChanged := false
 		if len(info.ParamOverride) > 0 {
 			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
 			if err != nil {
 				return newAPIErrorFromParamOverride(err)
 			}
+			bodyChanged = true
 		}
-		jsonData, err = sanitizeCodexOriginalResponsesBody(
+		var sanitized bool
+		mappedModel := ""
+		if info.IsModelMapped {
+			mappedModel = request.Model
+		}
+		jsonData, sanitized, err = sanitizeCodexOriginalResponsesBody(
 			jsonData,
 			info.RelayMode == relayconstant.RelayModeResponsesCompact,
+			mappedModel,
 		)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
-		body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		bodyChanged = bodyChanged || sanitized
+		if !bodyChanged {
+			attemptReader, err := storage.NewReader()
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+			}
+			defer attemptReader.Close()
+			info.UpstreamRequestBodySize = storage.Size()
+			requestBody = attemptReader
+			jsonData = nil
+		} else {
+			body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+			}
+			defer closer.Close()
+			info.UpstreamRequestBodySize = size
+			requestBody = body
+			jsonData = nil
 		}
-		defer closer.Close()
-		info.UpstreamRequestBodySize = size
-		requestBody = body
 	} else if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
+		attemptReader, err := storage.NewReader()
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
+		defer attemptReader.Close()
 		info.UpstreamRequestBodySize = storage.Size()
-		requestBody = common.ReaderOnly(storage)
+		requestBody = attemptReader
 	} else {
 		convertedRequest, err := adaptor.ConvertOpenAIResponsesRequest(c, info, *request)
 		if err != nil {
@@ -228,27 +268,44 @@ func shouldUseCodexOriginalResponsesBody(info *relaycommon.RelayInfo) bool {
 		info.RelayMode == relayconstant.RelayModeResponsesCompact
 }
 
-func sanitizeCodexOriginalResponsesBody(body []byte, compact bool) ([]byte, error) {
+func sanitizeCodexOriginalResponsesBody(body []byte, compact bool, mappedModel string) ([]byte, bool, error) {
 	var err error
+	changed := false
+	if mappedModel != "" && gjson.GetBytes(body, "model").String() != mappedModel {
+		body, err = sjson.SetBytes(body, "model", mappedModel)
+		if err != nil {
+			return nil, false, fmt.Errorf("set mapped Codex model: %w", err)
+		}
+		changed = true
+	}
 	if !gjson.GetBytes(body, "instructions").Exists() {
 		body, err = sjson.SetBytes(body, "instructions", "")
 		if err != nil {
-			return nil, fmt.Errorf("set Codex instructions: %w", err)
+			return nil, false, fmt.Errorf("set Codex instructions: %w", err)
 		}
+		changed = true
 	}
 	if compact {
-		return body, nil
+		return body, changed, nil
 	}
 
-	body, err = sjson.SetBytes(body, "store", false)
-	if err != nil {
-		return nil, fmt.Errorf("set Codex store: %w", err)
+	store := gjson.GetBytes(body, "store")
+	if !store.Exists() || store.Type != gjson.False {
+		body, err = sjson.SetBytes(body, "store", false)
+		if err != nil {
+			return nil, false, fmt.Errorf("set Codex store: %w", err)
+		}
+		changed = true
 	}
 	for _, field := range []string{"max_output_tokens", "temperature"} {
+		if !gjson.GetBytes(body, field).Exists() {
+			continue
+		}
 		body, err = sjson.DeleteBytes(body, field)
 		if err != nil {
-			return nil, fmt.Errorf("remove unsupported Codex field %q: %w", field, err)
+			return nil, false, fmt.Errorf("remove unsupported Codex field %q: %w", field, err)
 		}
+		changed = true
 	}
-	return body, nil
+	return body, changed, nil
 }

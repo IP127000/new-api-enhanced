@@ -97,11 +97,20 @@ func GetBodyStorage(c *gin.Context) (BodyStorage, error) {
 
 // CleanupBodyStorage 清理请求体存储（应在请求结束时调用）
 func CleanupBodyStorage(c *gin.Context) {
+	if c == nil {
+		return
+	}
 	if storage, exists := c.Get(KeyBodyStorage); exists && storage != nil {
 		if bs, ok := storage.(BodyStorage); ok {
-			bs.Close()
+			_ = bs.Close()
 		}
-		c.Set(KeyBodyStorage, nil)
+	}
+	// Gin returns Context objects to a sync.Pool without clearing Request.
+	// Remove every request-body reference before the context is pooled.
+	c.Set(KeyBodyStorage, nil)
+	c.Set(KeyRequestBody, nil)
+	if c.Request != nil {
+		c.Request.Body = http.NoBody
 	}
 }
 

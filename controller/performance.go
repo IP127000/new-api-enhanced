@@ -32,12 +32,18 @@ type PerformanceStats struct {
 
 // MemoryStats 内存统计
 type MemoryStats struct {
+	// 进程当前常驻内存（字节，Linux）
+	RSS uint64 `json:"rss"`
 	// 已分配内存（字节）
 	Alloc uint64 `json:"alloc"`
 	// 总分配内存（字节）
 	TotalAlloc uint64 `json:"total_alloc"`
 	// 系统内存（字节）
 	Sys uint64 `json:"sys"`
+	// 正在使用的堆 span（字节）
+	HeapInuse uint64 `json:"heap_inuse"`
+	// 已归还操作系统的堆内存（字节）
+	HeapReleased uint64 `json:"heap_released"`
 	// GC 次数
 	NumGC uint32 `json:"num_gc"`
 	// Goroutine 数量
@@ -122,9 +128,12 @@ func GetPerformanceStats(c *gin.Context) {
 	stats := PerformanceStats{
 		CacheStats: cacheStats,
 		MemoryStats: MemoryStats{
+			RSS:          getProcessRSS(),
 			Alloc:        memStats.Alloc,
 			TotalAlloc:   memStats.TotalAlloc,
 			Sys:          memStats.Sys,
+			HeapInuse:    memStats.HeapInuse,
+			HeapReleased: memStats.HeapReleased,
 			NumGC:        memStats.NumGC,
 			NumGoroutine: runtime.NumGoroutine(),
 		},
@@ -137,6 +146,23 @@ func GetPerformanceStats(c *gin.Context) {
 		"success": true,
 		"data":    stats,
 	})
+}
+
+func getProcessRSS() uint64 {
+	// /proc/self/statm: size resident shared text lib data dt (pages).
+	data, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 2 {
+		return 0
+	}
+	residentPages, err := strconv.ParseUint(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return residentPages * uint64(os.Getpagesize())
 }
 
 // ClearDiskCache 清理不活跃的磁盘缓存
