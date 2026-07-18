@@ -2,6 +2,29 @@
 
 ![new-api](/web/default/public/logo.png)
 
+# New API Enhanced
+
+## 新版 Codex Web Search 与图像能力增强
+
+**通过 New API 的 Codex 订阅渠道使用新版 Web Search、`gpt-image-2` 图像生成和图像编辑。**
+
+`/v1/alpha/search` · `/v1/images/generations` · `/v1/images/edits` · `/v1/models`
+
+</div>
+
+> 这个版本最重要的变化，是补齐新版 Codex 自定义提供商需要的搜索与图像接口。Web Search 使用 Codex Responses Lite 的独立搜索协议；图像生成和编辑直接转发到 Codex 订阅后端，并保留流式响应、multipart 请求和用量统计。
+
+## 关于这个仓库
+
+这是我维护的 New API 增强版，代码基础来自 [QuantumNous/new-api](https://github.com/QuantumNous/new-api)。上游负责通用的大模型网关、渠道管理、用户与额度系统、协议转换和管理界面；这个仓库主要补充 Codex 订阅渠道的兼容性、请求稳定性和运行数据统计。
+
+仓库采用快照方式维护，只保留当前分支和一个回滚分支。GitHub 上的提交记录因此不会复刻上游的完整历史；原项目作者、历史贡献和版本演进请以上游仓库为准。本仓库继续遵守 AGPLv3 及项目附加条款，界面中的 New API 署名和上游链接保持不变。
+
+<details>
+<summary>上游项目入口与多语言 README</summary>
+
+<div align="center">
+
 # New API
 
 🍥 **Next-Generation LLM Gateway and AI Asset Management System**
@@ -52,11 +75,7 @@
 
 </div>
 
-## 关于这个仓库
-
-这是我维护的 New API 增强版，代码基础来自 [QuantumNous/new-api](https://github.com/QuantumNous/new-api)。上游负责通用的大模型网关、渠道管理、用户与额度系统、协议转换和管理界面；这个仓库主要补充 Codex 订阅渠道的兼容性、请求稳定性和运行数据统计。
-
-仓库采用快照方式维护，只保留当前分支和一个回滚分支。GitHub 上的提交记录因此不会复刻上游的完整历史；原项目作者、历史贡献和版本演进请以上游仓库为准。本仓库继续遵守 AGPLv3 及项目附加条款，界面中的 New API 署名和上游链接保持不变。
+</details>
 
 ### 增强内容
 
