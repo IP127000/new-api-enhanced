@@ -192,6 +192,18 @@ Follow-up production deployment completed on July 18:
 - the superseded July 17 rollback container/image was removed after public
   health verification.
 
+Operational rollback on July 19:
+
+- the `uploadfree` build was rolled back after the operator reported serious
+  runtime problems during client testing;
+- current image/container: `new-api:20260718-rootfix` /
+  `new-api-20260718-rootfix`;
+- current Caddy target: `127.0.0.1:3025`;
+- `new-api:20260718-uploadfree` / `new-api-20260718-uploadfree` is kept stopped
+  for investigation and must not be returned to production without a root-cause
+  review and a new test build;
+- no database rollback or schema change was needed.
+
 Relevant files:
 
 - `controller/relay.go`
@@ -456,11 +468,11 @@ The working deployment pattern used for the July 4 build:
 
 Current server naming convention:
 
-- current image: `new-api:20260718-uploadfree`
-- current container: `new-api-20260718-uploadfree`
-- current Caddy target: `127.0.0.1:3026`
-- rollback image: `new-api:20260718-rootfix`
-- rollback container: `new-api-20260718-rootfix`
+- current image: `new-api:20260718-rootfix`
+- current container: `new-api-20260718-rootfix`
+- current Caddy target: `127.0.0.1:3025`
+- investigation image: `new-api:20260718-uploadfree`
+- investigation container: `new-api-20260718-uploadfree` (stopped)
 
 Image/container names should stay short: `new-api` + date + one word.
 
@@ -472,7 +484,7 @@ Production container startup parameters must stay generic:
 - do not add `anyrouter` through command args, env vars, labels, links, or extra hosts
 - `anyrouter` in usage logs/token names is database/runtime data, not a Docker startup route
 
-The current `new-api-20260718-uploadfree` container was inspected after deployment and has no `anyrouter` startup route.
+The current `new-api-20260718-rootfix` container was inspected after deployment and has no `anyrouter` startup route.
 
 ### Validation Used
 
