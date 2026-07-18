@@ -106,11 +106,11 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		// to capture authoritative usage without retaining a queue of large events.
 		scannerOptions.ClientGoneGracePeriod = codexTerminalUsageGracePeriod
 	}
-	helper.StreamScannerHandlerWithOptions(c, resp, info, scannerOptions, func(data string, sr *helper.StreamResult) {
+	helper.StreamScannerHandlerBytesWithOptions(c, resp, info, scannerOptions, func(data []byte, sr *helper.StreamResult) {
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
 		var streamResponse dto.ResponsesBillingStreamResponse
-		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
+		if err := common.Unmarshal(data, &streamResponse); err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
 			sr.Error(err)
 			return
@@ -180,7 +180,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 		downstreamGone := c.Request != nil && c.Request.Context().Err() != nil
 		if !downstreamGone {
-			if err := sendResponsesStreamData(c, streamResponse.Type, data); err != nil {
+			if err := sendResponsesStreamDataBytes(c, streamResponse.Type, data); err != nil {
 				expectedCancelDuringWrite := isCodexResponsesStream && c.Request.Context().Err() != nil &&
 					info.StreamStatus != nil && info.StreamStatus.IsClientCloseExpected()
 				if expectedCancelDuringWrite {

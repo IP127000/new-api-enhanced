@@ -242,3 +242,10 @@ func sendResponsesStreamData(c *gin.Context, eventType string, data string) erro
 	}
 	return helper.ResponseChunkDataByType(c, eventType, data)
 }
+
+func sendResponsesStreamDataBytes(c *gin.Context, eventType string, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	return helper.ResponseChunkDataBytesByType(c, eventType, data)
+}

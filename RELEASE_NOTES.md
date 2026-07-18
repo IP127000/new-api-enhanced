@@ -284,6 +284,9 @@ Follow-up memory fix prepared on July 19:
 - the scanner cannot read the next complete SSE event until the current large
   event has been parsed and forwarded, removing the previous read-ahead
   overlap between the scanner goroutine and handler goroutine;
+- the Codex Responses handler consumes `scanner.Bytes()` directly and writes
+  the payload as bytes, eliminating the additional full-event allocation made
+  by `scanner.Text()`;
 - all other stream formats retain their existing buffered handler path;
 - no database schema, migration, or statistics write was added.
 

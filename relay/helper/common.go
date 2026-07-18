@@ -120,6 +120,34 @@ func ResponseChunkDataByType(c *gin.Context, eventType string, data string) erro
 	return FlushWriter(c)
 }
 
+// ResponseChunkDataBytesByType writes a Responses SSE frame directly from the
+// scanner-owned payload. The caller must keep data valid until this function
+// returns and must not mutate it concurrently.
+func ResponseChunkDataBytesByType(c *gin.Context, eventType string, data []byte) error {
+	if c == nil || c.Writer == nil {
+		return errors.New("context or writer is nil")
+	}
+	if requestContextDone(c) {
+		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
+	}
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	if c.Writer.Header().Get("Cache-Control") == "" {
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+	}
+
+	prefix := "event: " + eventType + "\ndata: "
+	if _, err := io.WriteString(c.Writer, prefix); err != nil {
+		return fmt.Errorf("write response event prefix failed: %w", err)
+	}
+	if _, err := c.Writer.Write(data); err != nil {
+		return fmt.Errorf("write response event data failed: %w", err)
+	}
+	if _, err := io.WriteString(c.Writer, "\n\n"); err != nil {
+		return fmt.Errorf("write response event terminator failed: %w", err)
+	}
+	return FlushWriter(c)
+}
+
 func StringData(c *gin.Context, str string) error {
 	if c == nil || c.Writer == nil {
 		return errors.New("context or writer is nil")

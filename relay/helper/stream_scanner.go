@@ -2,6 +2,7 @@ package helper
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -159,12 +160,27 @@ func StreamScannerHandlerWithOptions(c *gin.Context, resp *http.Response, info *
 	if options.ClientGoneGracePeriod < 0 {
 		options.ClientGoneGracePeriod = 0
 	}
-	streamScannerHandler(c, resp, info, dataBufferSize, options.ClientGoneGracePeriod, options.InlineDataHandler, dataHandler)
+	streamScannerHandler(c, resp, info, dataBufferSize, options.ClientGoneGracePeriod, options.InlineDataHandler, dataHandler, nil)
 }
 
-func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, clientGoneGracePeriod time.Duration, inlineDataHandler bool, dataHandler func(data string, sr *StreamResult)) {
+// StreamScannerHandlerBytesWithOptions is the allocation-bounded variant for
+// large SSE payloads. The byte slice is valid only for the duration of the
+// callback and must not be retained. Handling is forced inline so Scanner may
+// not reuse its backing buffer before the callback returns.
+func StreamScannerHandlerBytesWithOptions(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, options StreamScannerOptions, dataHandler func(data []byte, sr *StreamResult)) {
+	dataBufferSize := options.DataBufferSize
+	if dataBufferSize < 0 {
+		dataBufferSize = 0
+	}
+	if options.ClientGoneGracePeriod < 0 {
+		options.ClientGoneGracePeriod = 0
+	}
+	streamScannerHandler(c, resp, info, dataBufferSize, options.ClientGoneGracePeriod, true, nil, dataHandler)
+}
 
-	if resp == nil || dataHandler == nil {
+func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, clientGoneGracePeriod time.Duration, inlineDataHandler bool, dataHandler func(data string, sr *StreamResult), bytesDataHandler func(data []byte, sr *StreamResult)) {
+
+	if resp == nil || (dataHandler == nil && bytesDataHandler == nil) {
 		return
 	}
 
@@ -362,6 +378,40 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			}
 
 			ticker.Reset(streamingTimeout)
+			if bytesDataHandler != nil {
+				line := scanner.Bytes()
+				logger.LogDebug(c, "stream scanner data: %s", line)
+				if len(line) < 6 {
+					continue
+				}
+				if !bytes.HasPrefix(line, []byte("data:")) && !bytes.HasPrefix(line, []byte("[DONE]")) {
+					continue
+				}
+				data := bytes.TrimSpace(line[5:])
+				if len(data) == 0 {
+					continue
+				}
+				if !bytes.HasPrefix(data, []byte("[DONE]")) {
+					info.SetFirstResponseTime()
+					info.ReceivedResponseCount++
+					inlineResult.reset()
+					func() {
+						writeMutex.Lock()
+						defer writeMutex.Unlock()
+						ExtendWriteDeadline(c)
+						defer ClearWriteDeadline(c)
+						bytesDataHandler(data, inlineResult)
+					}()
+					if inlineResult.IsStopped() {
+						return
+					}
+				} else {
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+					logger.LogDebug(c, "received [DONE], stopping scanner")
+					return
+				}
+				continue
+			}
 			data := scanner.Text()
 			logger.LogDebug(c, "stream scanner data: %s", data)
 
