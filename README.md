@@ -119,3 +119,7 @@ wire_api = "responses"
 base_url = "https://api.kendeji.fun/v1"
 http_headers = { "x-openai-actor-authorization" = "new-api-enhanced" }
 ```
+
+## 友情链接
+
+- [LINUX DO](https://linux.do/) - 一个真诚、友善、团结、专业的技术社区。
