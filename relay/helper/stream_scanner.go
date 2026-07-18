@@ -90,6 +90,11 @@ type StreamScannerOptions struct {
 	// DataBufferSize controls the number of complete SSE payloads queued between
 	// the upstream scanner and the data handler. Zero uses synchronous handoff.
 	DataBufferSize int
+	// InlineDataHandler runs the data handler on the scanner goroutine. This is
+	// the real synchronous mode for large Responses events: the scanner cannot
+	// read the next complete event until the current event has been parsed and
+	// forwarded, so large event payloads do not accumulate in two goroutines.
+	InlineDataHandler bool
 	// ClientGoneGracePeriod keeps reading the upstream briefly after an expected
 	// client cancellation. It is intended for protocols whose terminal usage
 	// event can immediately trail the event that caused client-side preemption.
@@ -154,10 +159,10 @@ func StreamScannerHandlerWithOptions(c *gin.Context, resp *http.Response, info *
 	if options.ClientGoneGracePeriod < 0 {
 		options.ClientGoneGracePeriod = 0
 	}
-	streamScannerHandler(c, resp, info, dataBufferSize, options.ClientGoneGracePeriod, dataHandler)
+	streamScannerHandler(c, resp, info, dataBufferSize, options.ClientGoneGracePeriod, options.InlineDataHandler, dataHandler)
 }
 
-func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, clientGoneGracePeriod time.Duration, dataHandler func(data string, sr *StreamResult)) {
+func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, clientGoneGracePeriod time.Duration, inlineDataHandler bool, dataHandler func(data string, sr *StreamResult)) {
 
 	if resp == nil || dataHandler == nil {
 		return
@@ -291,38 +296,44 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	dataChan := make(chan string, dataBufferSize)
-
-	wg.Add(1)
-	gopool.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.LogError(c, fmt.Sprintf("data handler goroutine panic: %v", r))
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("handler panic: %v", r))
-			}
-			stop()
-			wg.Done()
-		}()
-		sr := newStreamResult(info.StreamStatus)
-		for data := range dataChan {
-			sr.reset()
-			func() {
-				writeMutex.Lock()
-				defer writeMutex.Unlock()
-				ExtendWriteDeadline(c)
-				defer ClearWriteDeadline(c)
-				dataHandler(data, sr)
+	var inlineResult *StreamResult
+	if inlineDataHandler {
+		inlineResult = newStreamResult(info.StreamStatus)
+	} else {
+		wg.Add(1)
+		gopool.Go(func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.LogError(c, fmt.Sprintf("data handler goroutine panic: %v", r))
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("handler panic: %v", r))
+				}
+				stop()
+				wg.Done()
 			}()
-			if sr.IsStopped() {
-				return
+			sr := newStreamResult(info.StreamStatus)
+			for data := range dataChan {
+				sr.reset()
+				func() {
+					writeMutex.Lock()
+					defer writeMutex.Unlock()
+					ExtendWriteDeadline(c)
+					defer ClearWriteDeadline(c)
+					dataHandler(data, sr)
+				}()
+				if sr.IsStopped() {
+					return
+				}
 			}
-		}
-	})
+		})
+	}
 
 	// Scanner goroutine with improved error handling
 	wg.Add(1)
 	common.RelayCtxGo(ctx, func() {
 		defer func() {
-			close(dataChan)
+			if !inlineDataHandler {
+				close(dataChan)
+			}
 			if r := recover(); r != nil {
 				logger.LogError(c, fmt.Sprintf("scanner goroutine panic: %v", r))
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("scanner panic: %v", r))
@@ -368,26 +379,39 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			if !strings.HasPrefix(data, "[DONE]") {
 				info.SetFirstResponseTime()
 				info.ReceivedResponseCount++
-
-				for {
-					requestDone = nil
-					if !clientGone.Load() {
-						requestDone = c.Request.Context().Done()
+				if inlineDataHandler {
+					inlineResult.reset()
+					func() {
+						writeMutex.Lock()
+						defer writeMutex.Unlock()
+						ExtendWriteDeadline(c)
+						defer ClearWriteDeadline(c)
+						dataHandler(data, inlineResult)
+					}()
+					if inlineResult.IsStopped() {
+						return
 					}
-					select {
-					case dataChan <- data:
-						goto dataSent
-					case <-ctx.Done():
-						return
-					case <-stopChan:
-						return
-					case <-requestDone:
-						if observeClientGone("scanner_enqueue_context_done") {
+				} else {
+					for {
+						requestDone = nil
+						if !clientGone.Load() {
+							requestDone = c.Request.Context().Done()
+						}
+						select {
+						case dataChan <- data:
+							goto dataSent
+						case <-ctx.Done():
 							return
+						case <-stopChan:
+							return
+						case <-requestDone:
+							if observeClientGone("scanner_enqueue_context_done") {
+								return
+							}
 						}
 					}
+				dataSent:
 				}
-			dataSent:
 			} else {
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				logger.LogDebug(c, "received [DONE], stopping scanner")

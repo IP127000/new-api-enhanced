@@ -277,6 +277,16 @@ Operator rollback later on July 19:
 - no database schema, migration, or statistics change was made during the
   rollback.
 
+Follow-up memory fix prepared on July 19:
+
+- Codex Responses now uses a per-stream inline scanner/handler path; it does
+  not serialize separate HTTP requests or conversations;
+- the scanner cannot read the next complete SSE event until the current large
+  event has been parsed and forwarded, removing the previous read-ahead
+  overlap between the scanner goroutine and handler goroutine;
+- all other stream formats retain their existing buffered handler path;
+- no database schema, migration, or statistics write was added.
+
 Relevant files:
 
 - `controller/relay.go`

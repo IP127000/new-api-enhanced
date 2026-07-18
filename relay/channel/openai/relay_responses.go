@@ -98,7 +98,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	// synchronous handoff only for this format so concurrent large-context
 	// sessions cannot queue ten multi-MiB events each; other stream formats keep
 	// StreamScannerHandler's established buffering behavior.
-	scannerOptions := helper.StreamScannerOptions{DataBufferSize: 0}
+	scannerOptions := helper.StreamScannerOptions{DataBufferSize: 0, InlineDataHandler: true}
 	if isCodexResponsesStream {
 		// Codex multi-agent v2 can preempt a request after a completed reasoning
 		// or commentary item when mailbox input arrives, before the immediately
