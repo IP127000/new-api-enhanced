@@ -290,6 +290,16 @@ Follow-up memory fix prepared on July 19:
 - all other stream formats retain their existing buffered handler path;
 - no database schema, migration, or statistics write was added.
 
+Production deployment completed on July 19:
+
+- source commit: `a9afc748`;
+- current image/container: `new-api:20260719-bytes` /
+  `new-api-20260719-bytes`;
+- current version: `v1.0.0-rc.21-bytes-20260719`;
+- current Caddy target: `127.0.0.1:3030`;
+- the superseded `inline`, `preempt`, `diag`, and `rootfix` containers are
+  stopped while the operator validates the byte-stream path.
+
 Relevant files:
 
 - `controller/relay.go`
