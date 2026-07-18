@@ -1,7 +1,6 @@
 package helper
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,7 +21,6 @@ import (
 	"github.com/samber/lo"
 
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 func GetAndValidateRequest(c *gin.Context, format types.RelayFormat) (request dto.Request, err error) {
@@ -200,48 +198,67 @@ func getAndValidateMinimalCodexResponsesRequest(c *gin.Context) (*dto.OpenAIResp
 	if err != nil {
 		return nil, err
 	}
-	body, err := storage.Bytes()
+	fields, err := common.GetOrIndexJSONBodyFields(c, storage)
 	if err != nil {
 		return nil, err
 	}
-	fields, err := common.ExtractTopLevelJSONFields(body,
-		"model", "input", "stream", "max_output_tokens", "tools",
-	)
-	if err != nil {
-		return nil, err
+	fieldsByName := make(map[string]common.JSONFieldSpan, len(fields))
+	for _, field := range fields {
+		fieldsByName[field.Name] = field
 	}
 
 	request := &dto.OpenAIResponsesRequest{}
-	modelJSON, exists := fields["model"]
-	if !exists || bytes.Equal(modelJSON, []byte("null")) {
+	modelField, exists := fieldsByName["model"]
+	if !exists {
 		return nil, errors.New("model is required")
 	}
-	if err := json.Unmarshal(modelJSON, &request.Model); err != nil {
+	modelJSON, err := common.ReadJSONSpan(storage, modelField.Value, 64<<10)
+	if err != nil {
+		return nil, fmt.Errorf("model is invalid: %w", err)
+	}
+	if string(modelJSON) == "null" {
+		return nil, errors.New("model is required")
+	}
+	if err := common.Unmarshal(modelJSON, &request.Model); err != nil {
 		return nil, fmt.Errorf("model must be a string: %w", err)
 	}
-	if _, exists := fields["input"]; !exists {
+	if _, exists := fieldsByName["input"]; !exists {
 		return nil, errors.New("input is required")
 	}
 	// A tiny non-nil sentinel preserves the existing validation semantics.
 	// The actual input is read only from the original BodyStorage.
 	request.Input = json.RawMessage("true")
 
-	if raw, exists := fields["stream"]; exists && !bytes.Equal(raw, []byte("null")) {
-		var stream bool
-		if err := json.Unmarshal(raw, &stream); err != nil {
-			return nil, fmt.Errorf("stream must be a boolean: %w", err)
+	if field, exists := fieldsByName["stream"]; exists {
+		raw, err := common.ReadJSONSpan(storage, field.Value, 64)
+		if err != nil {
+			return nil, fmt.Errorf("stream is invalid: %w", err)
 		}
-		request.Stream = &stream
+		if string(raw) != "null" {
+			var stream bool
+			if err := common.Unmarshal(raw, &stream); err != nil {
+				return nil, fmt.Errorf("stream must be a boolean: %w", err)
+			}
+			request.Stream = &stream
+		}
 	}
-	if raw, exists := fields["max_output_tokens"]; exists && !bytes.Equal(raw, []byte("null")) {
-		var maxOutputTokens uint
-		if err := json.Unmarshal(raw, &maxOutputTokens); err != nil {
+
+	if field, exists := fieldsByName["max_output_tokens"]; exists {
+		raw, err := common.ReadJSONSpan(storage, field.Value, 128)
+		if err != nil {
 			return nil, fmt.Errorf("max_output_tokens is invalid: %w", err)
 		}
-		request.MaxOutputTokens = &maxOutputTokens
+		if string(raw) != "null" {
+			var maxOutputTokens uint
+			if err := common.Unmarshal(raw, &maxOutputTokens); err != nil {
+				return nil, fmt.Errorf("max_output_tokens is invalid: %w", err)
+			}
+			request.MaxOutputTokens = &maxOutputTokens
+		}
 	}
-	if raw, exists := fields["tools"]; exists {
-		request.Tools, err = minimalResponsesTools(raw)
+
+	if field, exists := fieldsByName["tools"]; exists {
+		request.Tools, err = minimalResponsesTools(storage, field.Value)
 		if err != nil {
 			return nil, err
 		}
@@ -258,9 +275,12 @@ func getAndValidateMinimalCodexResponsesRequest(c *gin.Context) (*dto.OpenAIResp
 	return request, nil
 }
 
-func minimalResponsesTools(raw json.RawMessage) (json.RawMessage, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || trimmed[0] != '[' {
+func minimalResponsesTools(storage common.BodyStorage, span common.JSONValueSpan) (json.RawMessage, error) {
+	firstByte, err := common.FirstJSONSpanByte(storage, span)
+	if err != nil {
+		return nil, fmt.Errorf("tools is invalid: %w", err)
+	}
+	if firstByte != '[' {
 		return nil, nil
 	}
 	type minimalTool struct {
@@ -268,24 +288,55 @@ func minimalResponsesTools(raw json.RawMessage) (json.RawMessage, error) {
 		SearchContextSize string `json:"search_context_size,omitempty"`
 	}
 	tools := make([]minimalTool, 0, 4)
-	err := common.ForEachJSONArrayValue(trimmed, func(toolJSON []byte) bool {
-		toolType := gjson.GetBytes(toolJSON, "type").String()
+	values, err := common.IndexJSONArray(storage, span)
+	if err != nil {
+		return nil, fmt.Errorf("tools is invalid: %w", err)
+	}
+	for _, value := range values {
+		valueType, err := common.FirstJSONSpanByte(storage, value)
+		if err != nil {
+			return nil, fmt.Errorf("tools is invalid: %w", err)
+		}
+		if valueType != '{' {
+			continue
+		}
+		fields, err := common.IndexJSONObject(storage, value)
+		if err != nil {
+			return nil, fmt.Errorf("tools is invalid: %w", err)
+		}
+		fieldsByName := make(map[string]common.JSONFieldSpan, len(fields))
+		for _, field := range fields {
+			fieldsByName[field.Name] = field
+		}
+		typeField, exists := fieldsByName["type"]
+		if !exists {
+			continue
+		}
+		typeJSON, err := common.ReadJSONSpan(storage, typeField.Value, 64<<10)
+		if err != nil {
+			return nil, fmt.Errorf("tool type is invalid: %w", err)
+		}
+		toolType := common.JsonRawMessageToString(typeJSON)
 		if toolType == "" {
-			return true
+			continue
+		}
+		searchContextSize := ""
+		if searchField, exists := fieldsByName["search_context_size"]; exists {
+			searchJSON, err := common.ReadJSONSpan(storage, searchField.Value, 64<<10)
+			if err != nil {
+				return nil, fmt.Errorf("tool search_context_size is invalid: %w", err)
+			}
+			searchContextSize = common.JsonRawMessageToString(searchJSON)
 		}
 		tools = append(tools, minimalTool{
 			Type:              toolType,
-			SearchContextSize: gjson.GetBytes(toolJSON, "search_context_size").String(),
+			SearchContextSize: searchContextSize,
 		})
-		return true
-	})
-	if err != nil {
-		return nil, fmt.Errorf("tools is invalid: %w", err)
 	}
 	if len(tools) == 0 {
 		return nil, nil
 	}
-	encoded, err := json.Marshal(tools)
+	encoded, err := common.Marshal(tools)
 	if err != nil {
 		return nil, err
 	}

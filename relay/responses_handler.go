@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -107,6 +108,8 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 	adaptor.Init(info)
 	var requestBody io.Reader
+	var codexOutboundStorage common.BodyStorage
+	var closeCodexOutboundStorage bool
 	if useCodexOriginalBody {
 		if err := relaycommon.ApplyCodexClientHeaderPassthroughWithRelayInfo(info); err != nil {
 			return newAPIErrorFromParamOverride(err)
@@ -115,51 +118,34 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 		}
-		jsonData, err := storage.Bytes()
-		if err != nil {
-			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
-		}
-		bodyChanged := false
-		if len(info.ParamOverride) > 0 {
-			jsonData, err = relaycommon.ApplyParamOverrideWithRelayInfo(jsonData, info)
-			if err != nil {
-				return newAPIErrorFromParamOverride(err)
-			}
-			bodyChanged = true
-		}
-		var sanitized bool
 		mappedModel := ""
 		if info.IsModelMapped {
 			mappedModel = request.Model
 		}
-		jsonData, sanitized, err = sanitizeCodexOriginalResponsesBody(
-			jsonData,
+		codexOutboundStorage, closeCodexOutboundStorage, err = prepareCodexOriginalResponsesBody(
+			c,
+			storage,
+			info,
 			info.RelayMode == relayconstant.RelayModeResponsesCompact,
 			mappedModel,
 		)
 		if err != nil {
+			var overrideErr *codexParamOverrideApplyError
+			if errors.As(err, &overrideErr) {
+				return newAPIErrorFromParamOverride(err)
+			}
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 		}
-		bodyChanged = bodyChanged || sanitized
-		if !bodyChanged {
-			attemptReader, err := storage.NewReader()
-			if err != nil {
-				return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
-			}
-			defer attemptReader.Close()
-			info.UpstreamRequestBodySize = storage.Size()
-			requestBody = attemptReader
-			jsonData = nil
-		} else {
-			body, size, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
-			if err != nil {
-				return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
-			}
-			defer closer.Close()
-			info.UpstreamRequestBodySize = size
-			requestBody = body
-			jsonData = nil
+		if closeCodexOutboundStorage {
+			defer codexOutboundStorage.Close()
 		}
+		attemptReader, err := codexOutboundStorage.NewReader()
+		if err != nil {
+			return types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+		}
+		defer attemptReader.Close()
+		info.UpstreamRequestBodySize = codexOutboundStorage.Size()
+		requestBody = attemptReader
 	} else if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
@@ -226,6 +212,13 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			return newAPIError
 		}
 	}
+	if useCodexOriginalBody && info.IsStream && httpResp != nil && httpResp.StatusCode == http.StatusOK {
+		// HTTP 200 commits a Codex Responses stream in the current relay: any
+		// later SSE failure is surfaced on that stream rather than replayed. The
+		// per-attempt reader has already been closed by doRequest, so the replay
+		// storage is no longer needed while generation continues.
+		commitCodexResponsesStream(c, codexOutboundStorage, closeCodexOutboundStorage)
+	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
 	if newAPIError != nil {
@@ -258,6 +251,136 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+type codexParamOverrideApplyError struct {
+	err error
+}
+
+func (e *codexParamOverrideApplyError) Error() string {
+	return e.err.Error()
+}
+
+func (e *codexParamOverrideApplyError) Unwrap() error {
+	return e.err
+}
+
+func commitCodexResponsesStream(c *gin.Context, outboundStorage common.BodyStorage, closeOutboundStorage bool) {
+	common.SetContextKey(c, appconstant.ContextKeyRelayRetryCommitted, true)
+	if closeOutboundStorage && outboundStorage != nil {
+		_ = outboundStorage.Close()
+	}
+	common.ReleaseBodyStorage(c)
+}
+
+func prepareCodexOriginalResponsesBody(
+	c *gin.Context,
+	storage common.BodyStorage,
+	info *relaycommon.RelayInfo,
+	compact bool,
+	mappedModel string,
+) (common.BodyStorage, bool, error) {
+	if len(info.ParamOverride) > 0 {
+		if relaycommon.CanApplyParamOverrideWithoutBody(info.ParamOverride) {
+			if _, err := relaycommon.ApplyParamOverrideWithRelayInfo([]byte(`{}`), info); err != nil {
+				return nil, false, &codexParamOverrideApplyError{err: err}
+			}
+		} else {
+			// Arbitrary parameter overrides can address nested paths and therefore
+			// retain the established in-memory fallback. Normal Codex subscription
+			// traffic only has header operations and uses the streaming path below.
+			body, err := storage.Bytes()
+			if err != nil {
+				return nil, false, err
+			}
+			body, err = relaycommon.ApplyParamOverrideWithRelayInfo(body, info)
+			if err != nil {
+				return nil, false, &codexParamOverrideApplyError{err: err}
+			}
+			body, _, err = sanitizeCodexOriginalResponsesBody(body, compact, mappedModel)
+			if err != nil {
+				return nil, false, err
+			}
+			outboundStorage, err := common.CreateBodyStorage(body)
+			if err != nil {
+				return nil, false, err
+			}
+			return outboundStorage, true, nil
+		}
+	}
+
+	fields, err := common.GetOrIndexJSONBodyFields(c, storage)
+	if err != nil {
+		return nil, false, err
+	}
+	fieldsByName := make(map[string]common.JSONFieldSpan, len(fields))
+	for _, field := range fields {
+		fieldsByName[field.Name] = field
+	}
+
+	edits := make(map[string]common.JSONFieldEdit, 4)
+	additions := make([]common.JSONFieldAddition, 0, 2)
+	changed := false
+	if mappedModel != "" {
+		currentModel := ""
+		if modelField, exists := fieldsByName["model"]; exists {
+			modelJSON, err := common.ReadJSONSpan(storage, modelField.Value, 64<<10)
+			if err != nil {
+				return nil, false, err
+			}
+			currentModel = common.JsonRawMessageToString(modelJSON)
+		}
+		if currentModel != mappedModel {
+			encodedModel, err := common.Marshal(mappedModel)
+			if err != nil {
+				return nil, false, err
+			}
+			edits["model"] = common.JSONFieldEdit{Replacement: encodedModel}
+			changed = true
+		}
+	}
+	if _, exists := fieldsByName["instructions"]; !exists {
+		additions = append(additions, common.JSONFieldAddition{Name: "instructions", Value: []byte(`""`)})
+		changed = true
+	}
+	if !compact {
+		if storeField, exists := fieldsByName["store"]; exists {
+			isFalse := false
+			if storeField.Value.End-storeField.Value.Start == int64(len("false")) {
+				storeJSON, err := common.ReadJSONSpan(storage, storeField.Value, int64(len("false")))
+				if err != nil {
+					return nil, false, err
+				}
+				isFalse = string(storeJSON) == "false"
+			}
+			if !isFalse {
+				edits["store"] = common.JSONFieldEdit{Replacement: []byte("false")}
+				changed = true
+			}
+		} else {
+			additions = append(additions, common.JSONFieldAddition{Name: "store", Value: []byte("false")})
+			changed = true
+		}
+		for _, fieldName := range []string{"max_output_tokens", "temperature"} {
+			if _, exists := fieldsByName[fieldName]; exists {
+				edits[fieldName] = common.JSONFieldEdit{Delete: true}
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return storage, false, nil
+	}
+
+	reader, size, err := common.NewTopLevelJSONObjectReader(storage, fields, edits, additions)
+	if err != nil {
+		return nil, false, err
+	}
+	outboundStorage, err := common.CreateBodyStorageFromReader(reader, size, size)
+	if err != nil {
+		return nil, false, err
+	}
+	return outboundStorage, true, nil
 }
 
 func shouldUseCodexOriginalResponsesBody(info *relaycommon.RelayInfo) bool {

@@ -19,6 +19,7 @@ import (
 
 const KeyRequestBody = "key_request_body"
 const KeyBodyStorage = "key_body_storage"
+const KeyBodyStorageReleased = "key_body_storage_released"
 
 var ErrRequestBodyTooLarge = errors.New("request body too large")
 
@@ -42,6 +43,9 @@ func GetRequestBody(c *gin.Context) (io.Seeker, error) {
 			}
 			return bs, nil
 		}
+	}
+	if released, exists := c.Get(KeyBodyStorageReleased); exists && released == true {
+		return nil, ErrStorageClosed
 	}
 
 	// 检查旧的缓存方式
@@ -95,8 +99,27 @@ func GetBodyStorage(c *gin.Context) (BodyStorage, error) {
 	return bs, nil
 }
 
-// CleanupBodyStorage 清理请求体存储（应在请求结束时调用）
-func CleanupBodyStorage(c *gin.Context) {
+// GetOrIndexJSONBodyFields validates and indexes the request's top-level JSON
+// object without materializing large nested values. The index is safe to reuse
+// for the lifetime of the original immutable BodyStorage.
+func GetOrIndexJSONBodyFields(c *gin.Context, storage BodyStorage) ([]JSONFieldSpan, error) {
+	if fields, ok := GetContextKeyType[[]JSONFieldSpan](c, constant.ContextKeyJSONBodyTopLevelFields); ok {
+		return fields, nil
+	}
+	if storage == nil {
+		return nil, errors.New("body storage is nil")
+	}
+	fields, err := IndexTopLevelJSONObject(storage, storage.Size())
+	if err != nil {
+		return nil, err
+	}
+	SetContextKey(c, constant.ContextKeyJSONBodyTopLevelFields, fields)
+	return fields, nil
+}
+
+// ReleaseBodyStorage closes and detaches the replayable request body. It is
+// safe to call before the response stream ends once relay retry is committed.
+func ReleaseBodyStorage(c *gin.Context) {
 	if c == nil {
 		return
 	}
@@ -109,9 +132,16 @@ func CleanupBodyStorage(c *gin.Context) {
 	// Remove every request-body reference before the context is pooled.
 	c.Set(KeyBodyStorage, nil)
 	c.Set(KeyRequestBody, nil)
+	c.Set(KeyBodyStorageReleased, true)
+	SetContextKey(c, constant.ContextKeyJSONBodyTopLevelFields, nil)
 	if c.Request != nil {
 		c.Request.Body = http.NoBody
 	}
+}
+
+// CleanupBodyStorage 清理请求体存储（应在请求结束时调用）
+func CleanupBodyStorage(c *gin.Context) {
+	ReleaseBodyStorage(c)
 }
 
 func UnmarshalBodyReusable(c *gin.Context, v any) error {

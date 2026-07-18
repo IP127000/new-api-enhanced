@@ -315,22 +315,61 @@ func extractChannelAffinityValue(c *gin.Context, src operation_setting.ChannelAf
 		if err != nil {
 			return ""
 		}
+		if isSimpleTopLevelGJSONPath(src.Path) {
+			fields, err := common.GetOrIndexJSONBodyFields(c, storage)
+			if err != nil {
+				return ""
+			}
+			for _, field := range fields {
+				if field.Name != src.Path {
+					continue
+				}
+				const maxAffinityValueBytes = 1 << 20
+				raw, err := common.ReadJSONSpan(storage, field.Value, maxAffinityValueBytes)
+				if err != nil {
+					return ""
+				}
+				return channelAffinityJSONResultValue(gjson.ParseBytes(raw))
+			}
+			return ""
+		}
 		body, err := storage.Bytes()
 		if err != nil || len(body) == 0 {
 			return ""
 		}
 		res := gjson.GetBytes(body, src.Path)
-		if !res.Exists() {
-			return ""
-		}
-		switch res.Type {
-		case gjson.String, gjson.Number, gjson.True, gjson.False:
-			return strings.TrimSpace(res.String())
-		default:
-			return strings.TrimSpace(res.Raw)
-		}
+		return channelAffinityJSONResultValue(res)
 	default:
 		return ""
+	}
+}
+
+func isSimpleTopLevelGJSONPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	for i := 0; i < len(path); i++ {
+		char := path[i]
+		if (char >= 'a' && char <= 'z') ||
+			(char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') ||
+			char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func channelAffinityJSONResultValue(res gjson.Result) string {
+	if !res.Exists() {
+		return ""
+	}
+	switch res.Type {
+	case gjson.String, gjson.Number, gjson.True, gjson.False:
+		return strings.TrimSpace(res.String())
+	default:
+		return strings.TrimSpace(res.Raw)
 	}
 }
 

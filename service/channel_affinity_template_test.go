@@ -1,17 +1,28 @@
 package service
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type affinityStorageWithoutBytes struct {
+	common.BodyStorage
+}
+
+func (s *affinityStorageWithoutBytes) Bytes() ([]byte, error) {
+	return nil, errors.New("full-body Bytes call is forbidden")
+}
 
 func buildChannelAffinityTemplateContextForTest(meta channelAffinityMeta) *gin.Context {
 	rec := httptest.NewRecorder()
@@ -187,6 +198,35 @@ func TestExtractChannelAffinityValue_RequestHeader(t *testing.T) {
 	})
 
 	require.Equal(t, "tenant-123", value)
+}
+
+func TestExtractChannelAffinityValue_TopLevelJSONDoesNotMaterializeLargeBody(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-sol","prompt_cache_key":"thread-123","input":"` + strings.Repeat("x", 2<<20) + `"}`)
+	storage, err := common.CreateBodyStorage(body)
+	require.NoError(t, err)
+	wrapper := &affinityStorageWithoutBytes{BodyStorage: storage}
+
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", http.NoBody)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.Body = io.NopCloser(wrapper)
+	ctx.Set(common.KeyBodyStorage, wrapper)
+	t.Cleanup(func() { common.CleanupBodyStorage(ctx) })
+
+	value := extractChannelAffinityValue(ctx, operation_setting.ChannelAffinityKeySource{
+		Type: "gjson",
+		Path: "prompt_cache_key",
+	})
+
+	require.Equal(t, "thread-123", value)
+}
+
+func TestSimpleTopLevelGJSONPath(t *testing.T) {
+	require.True(t, isSimpleTopLevelGJSONPath("prompt_cache_key"))
+	require.True(t, isSimpleTopLevelGJSONPath("tenant-id"))
+	require.False(t, isSimpleTopLevelGJSONPath("metadata.user_id"))
+	require.False(t, isSimpleTopLevelGJSONPath("!true"))
+	require.False(t, isSimpleTopLevelGJSONPath("items.#.id"))
 }
 
 func TestGetPreferredChannelByAffinity_RequestHeaderKeySource(t *testing.T) {

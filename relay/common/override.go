@@ -203,6 +203,32 @@ func ApplyParamOverrideWithRelayInfo(jsonData []byte, info *RelayInfo) ([]byte, 
 	return result, nil
 }
 
+// CanApplyParamOverrideWithoutBody reports whether every configured operation
+// is independent of request JSON. This lets large Codex bodies keep the
+// allocation-bounded forwarding path when an affinity rule only passes or
+// rewrites headers. Arbitrary JSON paths and conditional operations retain the
+// established full-body compatibility path.
+func CanApplyParamOverrideWithoutBody(paramOverride map[string]interface{}) bool {
+	if len(paramOverride) == 0 || len(buildLegacyParamOverride(paramOverride)) > 0 {
+		return false
+	}
+	operations, ok := tryParseOperations(paramOverride)
+	if !ok || len(operations) == 0 {
+		return false
+	}
+	for _, operation := range operations {
+		if len(operation.Conditions) > 0 {
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(operation.Mode)) {
+		case "set_header", "delete_header", "copy_header", "move_header", "pass_headers", "return_error":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func ApplyCodexClientHeaderPassthroughWithRelayInfo(info *RelayInfo) error {
 	if info == nil {
 		return nil

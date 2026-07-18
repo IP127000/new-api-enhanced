@@ -120,6 +120,25 @@ func TestApplyParamOverrideMixedLegacyAndOperationsConflictPrefersOperations(t *
 	assertJSONEqual(t, `{"model":"op-model","temperature":0.2}`, string(out))
 }
 
+func TestCanApplyParamOverrideWithoutBody(t *testing.T) {
+	require.True(t, CanApplyParamOverrideWithoutBody(map[string]interface{}{
+		"operations": []map[string]interface{}{
+			{"mode": "pass_headers", "value": []string{"Originator"}},
+			{"mode": "set_header", "path": "X-Test", "value": "yes"},
+		},
+	}))
+	require.False(t, CanApplyParamOverrideWithoutBody(map[string]interface{}{
+		"operations": []map[string]interface{}{{"mode": "set", "path": "store", "value": false}},
+	}))
+	require.False(t, CanApplyParamOverrideWithoutBody(map[string]interface{}{
+		"operations": []map[string]interface{}{{
+			"mode":       "pass_headers",
+			"value":      []string{"Originator"},
+			"conditions": []map[string]interface{}{{"path": "model", "mode": "full", "value": "gpt-5"}},
+		}},
+	}))
+}
+
 func TestApplyParamOverrideTrimRequiresValue(t *testing.T) {
 	// trim_prefix requires value example:
 	// {"operations":[{"path":"model","mode":"trim_prefix"}]}

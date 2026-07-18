@@ -2,6 +2,7 @@ package helper
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
+
+type bodyStorageWithoutBytes struct {
+	common.BodyStorage
+}
+
+func (s *bodyStorageWithoutBytes) Bytes() ([]byte, error) {
+	return nil, errors.New("full-body Bytes call is forbidden")
+}
 
 func newResponsesRequestContext(t *testing.T, body []byte, channelType int) *gin.Context {
 	t.Helper()
@@ -72,6 +81,24 @@ func TestMinimalCodexResponsesRequestKeepsOnlyRelayMetadata(t *testing.T) {
 	stored, err := storage.Bytes()
 	require.NoError(t, err)
 	require.Equal(t, body, stored)
+}
+
+func TestMinimalCodexResponsesRequestDoesNotReadFullBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableMinimalCodexResponsesForTest(t)
+
+	body := largeResponsesRequestBody()
+	c := newResponsesRequestContext(t, body, constant.ChannelTypeCodex)
+	storage, err := common.GetBodyStorage(c)
+	require.NoError(t, err)
+	wrapped := &bodyStorageWithoutBytes{BodyStorage: storage}
+	c.Set(common.KeyBodyStorage, wrapped)
+	c.Request.Body = io.NopCloser(wrapped)
+
+	request, err := GetAndValidateResponsesRequest(c)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-5.6-sol", request.Model)
+	require.JSONEq(t, `[{"type":"web_search","search_context_size":"high"},{"type":"image_generation"}]`, string(request.Tools))
 }
 
 func TestResponsesRequestUsesFullDecodeOutsideSelfUseCodex(t *testing.T) {

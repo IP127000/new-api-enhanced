@@ -69,6 +69,12 @@ const (
 	// ContextKeyCodexResponsesMinimalRequest marks the allocation-bounded
 	// request shell used only for self-use Codex original-body forwarding.
 	ContextKeyCodexResponsesMinimalRequest ContextKey = "codex_responses_minimal_request"
+	// ContextKeyJSONBodyTopLevelFields caches the allocation-bounded top-level
+	// JSON index built by the distributor for reuse by later relay stages.
+	ContextKeyJSONBodyTopLevelFields ContextKey = "json_body_top_level_fields"
+	// ContextKeyRelayRetryCommitted marks that a streaming response has crossed
+	// the point where replaying the request could duplicate downstream events.
+	ContextKeyRelayRetryCommitted ContextKey = "relay_retry_committed"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded
 	// a manage/operation audit log inside the handler. When set, the admin-audit

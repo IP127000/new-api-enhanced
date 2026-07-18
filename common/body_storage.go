@@ -13,6 +13,7 @@ import (
 // BodyStorage 请求体存储接口
 type BodyStorage interface {
 	io.ReadSeeker
+	io.ReaderAt
 	io.Closer
 	// NewReader opens an independent cursor for one upstream attempt. Closing
 	// it never closes the underlying BodyStorage.
@@ -84,6 +85,15 @@ func (m *memoryStorage) Seek(offset int64, whence int) (int64, error) {
 		return 0, ErrStorageClosed
 	}
 	return m.reader.Seek(offset, whence)
+}
+
+func (m *memoryStorage) ReadAt(p []byte, offset int64) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if atomic.LoadInt32(&m.closed) == 1 {
+		return 0, ErrStorageClosed
+	}
+	return bytes.NewReader(m.data).ReadAt(p, offset)
 }
 
 func (m *memoryStorage) Close() error {
@@ -221,6 +231,15 @@ func (d *diskStorage) Seek(offset int64, whence int) (int64, error) {
 		return 0, ErrStorageClosed
 	}
 	return d.file.Seek(offset, whence)
+}
+
+func (d *diskStorage) ReadAt(p []byte, offset int64) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if atomic.LoadInt32(&d.closed) == 1 {
+		return 0, ErrStorageClosed
+	}
+	return d.file.ReadAt(p, offset)
 }
 
 func (d *diskStorage) Close() error {

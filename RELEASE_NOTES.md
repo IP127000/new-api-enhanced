@@ -136,6 +136,32 @@ amplification and retention root cause. Preserve these additional changes:
 - the performance page distinguishes current heap/process RSS from cumulative
   `TotalAlloc` and runtime-reserved `Sys`, and exposes HeapInuse/HeapReleased.
 
+The follow-up request-lifetime fix keeps retry behavior before an upstream
+response is accepted, but no longer keeps uploaded request bodies alive for the
+rest of a successful Codex SSE generation:
+
+- connection failures and non-200 responses still retain the immutable original
+  body for same-channel retries and channel switching;
+- an HTTP 200 Codex Responses stream commits the relay attempt, closes both the
+  original replay storage and any rewritten outbound storage immediately, and
+  continues reading/writing the upstream SSE response normally;
+- a stream error after that commit is returned on the existing stream and is not
+  replayed, avoiding duplicate events or duplicate tool execution;
+- releasing the body does not cancel the Gin request context or close the
+  upstream response body;
+- the distributor and the Codex `prompt_cache_key` affinity lookup share an
+  8 KiB-buffered top-level JSON span index, so a disk-backed request is not read
+  back into one large Go heap buffer merely to obtain routing metadata;
+- required top-level Codex rewrites (`model`, `instructions`, `store`,
+  `max_output_tokens`, and `temperature`) are produced as a sectioned stream;
+  unchanged large `input`, tool schemas, web-search data, and image-generation
+  inputs are copied directly between body stores;
+- header-only parameter overrides, including the default Codex affinity
+  `pass_headers` rule, run without materializing the request JSON;
+- arbitrary nested body overrides, tiered billing expressions that inspect the
+  request body, and full sensitive-word inspection retain their compatibility
+  paths and may still materialize or retain the complete body when enabled.
+
 The production evidence for this root cause was request-body-specific: the
 performance page showed 237.76 MiB across ten active `BodyStorage` buffers while
 the corresponding successful `/v1/responses` rows had zero image-generation
@@ -170,10 +196,15 @@ Relevant files:
 - `relay/helper/stream_scanner.go`
 - `relay/helper/valid_request.go`
 - `relay/responses_handler.go`
+- `relay/common/override.go`
 - `common/body_storage.go`
 - `common/gin.go`
+- `common/json_stream.go`
+- `constant/context_key.go`
+- `middleware/distributor.go`
 - `middleware/body_cleanup.go`
 - `relay/channel/openai/relay_image.go`
+- `service/channel_affinity.go`
 - `controller/performance.go`
 
 ### Failed Channel Retry Cycling
