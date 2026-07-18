@@ -252,6 +252,21 @@ Production deployment completed on July 19:
 - the rejected `uploadfree` container/image and the uploaded image tarball were
   removed after the public health check passed.
 
+Diagnostic logging deployment completed later on July 19:
+
+- source changes: `relay/helper/stream_scanner.go` and
+  `relay/channel/openai/relay_responses.go`;
+- current image/container: `new-api:20260719-diag` /
+  `new-api-20260719-diag`;
+- current version: `v1.0.0-rc.21-diag-20260719`;
+- current Caddy target: `127.0.0.1:3028`;
+- diagnostics are written only to the existing application/container logs;
+  this change adds no database tables, columns, indexes, migrations, or
+  statistics writes;
+- logs correlate request ID, upstream request ID, context error, write error,
+  expected-close state, grace start/end/expiry, terminal usage, upstream body
+  close, and final stream reason without logging request or response payloads.
+
 Relevant files:
 
 - `controller/relay.go`

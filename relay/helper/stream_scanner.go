@@ -105,6 +105,32 @@ func setClientGoneEndReason(c *gin.Context, status *relaycommon.StreamStatus) {
 	status.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
 }
 
+// StreamDiagnostic returns a safe, request-correlated stream lifecycle summary
+// without including request or response payloads.
+func StreamDiagnostic(c *gin.Context, info *relaycommon.RelayInfo, stage string) string {
+	requestID := ""
+	upstreamRequestID := ""
+	contextErr := "<nil>"
+	if c != nil {
+		requestID = c.GetString(common.RequestIdKey)
+		upstreamRequestID = c.GetString(common.UpstreamRequestIdKey)
+		if c.Request != nil && c.Request.Context().Err() != nil {
+			contextErr = c.Request.Context().Err().Error()
+		}
+	}
+	expectedClose := false
+	endReason := relaycommon.StreamEndReasonNone
+	received := 0
+	if info != nil {
+		received = info.ReceivedResponseCount
+		if info.StreamStatus != nil {
+			expectedClose = info.StreamStatus.IsClientCloseExpected()
+			endReason = info.StreamStatus.EndReason
+		}
+	}
+	return fmt.Sprintf("stream_diag stage=%s request_id=%s upstream_request_id=%s context_err=%s expected_close=%t end_reason=%s received=%d", stage, requestID, upstreamRequestID, contextErr, expectedClose, endReason, received)
+}
+
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
 	StreamScannerHandlerWithOptions(c, resp, info, StreamScannerOptions{
 		DataBufferSize: defaultStreamDataBufferSize,
@@ -159,12 +185,14 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			close(stopChan)
 		})
 	}
-	observeClientGone := func() bool {
+	observeClientGone := func(source string) bool {
 		setClientGoneEndReason(c, info.StreamStatus)
+		logger.LogError(c, StreamDiagnostic(c, info, "downstream_context_done source="+source))
 		if clientGoneGracePeriod <= 0 || !info.StreamStatus.IsClientCloseExpected() {
 			return true
 		}
 		clientGone.Store(true)
+		logger.LogInfo(c, StreamDiagnostic(c, info, fmt.Sprintf("client_gone_grace_started duration=%s source=%s", clientGoneGracePeriod, source)))
 		return false
 	}
 
@@ -193,6 +221,7 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			cancel()
 			stop()
 			if resp.Body != nil {
+				logger.LogInfo(c, StreamDiagnostic(c, info, "upstream_body_close"))
 				_ = resp.Body.Close()
 			}
 
@@ -315,7 +344,7 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			case <-ctx.Done():
 				return
 			case <-requestDone:
-				if observeClientGone() {
+				if observeClientGone("scanner_context_done") {
 					return
 				}
 			default:
@@ -353,7 +382,7 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 					case <-stopChan:
 						return
 					case <-requestDone:
-						if observeClientGone() {
+						if observeClientGone("scanner_enqueue_context_done") {
 							return
 						}
 					}
@@ -384,13 +413,15 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	case <-stopChan:
 		// EndReason already set by the goroutine that triggered stopChan
 	case <-c.Request.Context().Done():
-		if observeClientGone() {
+		if observeClientGone("main_context_done") {
 			break
 		}
 		graceTimer := time.NewTimer(clientGoneGracePeriod)
 		select {
 		case <-stopChan:
+			logger.LogInfo(c, StreamDiagnostic(c, info, "client_gone_grace_ended_by_stream"))
 		case <-graceTimer.C:
+			logger.LogError(c, StreamDiagnostic(c, info, fmt.Sprintf("client_gone_grace_expired duration=%s", clientGoneGracePeriod)))
 		}
 		if !graceTimer.Stop() {
 			select {
@@ -402,8 +433,8 @@ func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 
 	cleanup()
 	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
-		logger.LogInfo(c, fmt.Sprintf("stream ended: %s", info.StreamStatus.Summary()))
+		logger.LogInfo(c, fmt.Sprintf("%s summary=%s", StreamDiagnostic(c, info, "stream_end"), info.StreamStatus.Summary()))
 	} else {
-		logger.LogError(c, fmt.Sprintf("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
+		logger.LogError(c, fmt.Sprintf("%s summary=%s", StreamDiagnostic(c, info, "stream_end"), info.StreamStatus.Summary()))
 	}
 }

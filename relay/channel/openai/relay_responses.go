@@ -141,6 +141,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				}
 			}
 			completed = true
+			logger.LogInfo(c, fmt.Sprintf("%s event=response.completed prompt_tokens=%d completion_tokens=%d total_tokens=%d cached_tokens=%d cache_write_tokens=%d", helper.StreamDiagnostic(c, info, "responses_terminal_seen"), usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, usage.PromptTokensDetails.CachedTokens, usage.PromptTokensDetails.CacheWriteTokens))
 		case "response.output_text.delta":
 			// Self-use Codex Responses trusts terminal upstream usage and does not
 			// retain the whole generated text solely for abnormal-stream fallback.
@@ -157,6 +158,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 					(streamResponse.Item.Type == "function_call" ||
 						(isCodexResponsesStream && isCodexMailboxPreemptionPoint(streamResponse.Item))) {
 					info.StreamStatus.MarkClientCloseExpected()
+					logger.LogInfo(c, fmt.Sprintf("%s event=response.output_item.done item_type=%s item_role=%s item_phase=%s", helper.StreamDiagnostic(c, info, "responses_expected_close_marked"), streamResponse.Item.Type, streamResponse.Item.Role, streamResponse.Item.Phase))
 				}
 				switch streamResponse.Item.Type {
 				case dto.BuildInCallWebSearchCall:
@@ -182,11 +184,13 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				expectedCancelDuringWrite := isCodexResponsesStream && c.Request.Context().Err() != nil &&
 					info.StreamStatus != nil && info.StreamStatus.IsClientCloseExpected()
 				if expectedCancelDuringWrite {
+					logger.LogInfo(c, fmt.Sprintf("%s event_type=%s downstream_write_error=%v", helper.StreamDiagnostic(c, info, "responses_expected_cancel_during_write"), streamResponse.Type, err))
 					// The client cancelled while this preemption-point event was being
 					// flushed. Let the scanner's bounded grace read only the terminal
 					// usage event instead of treating the expected cancel as a write
 					// failure and closing the upstream immediately.
 				} else {
+					logger.LogError(c, fmt.Sprintf("%s event_type=%s downstream_write_error=%v", helper.StreamDiagnostic(c, info, "responses_downstream_write_failed"), streamResponse.Type, err))
 					// Usage from response.completed has already been captured above. A
 					// failed downstream write means no consumer remains, so stop immediately
 					// and let StreamScannerHandler close the upstream body.
