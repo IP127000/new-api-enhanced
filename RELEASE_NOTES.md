@@ -76,6 +76,48 @@ Relevant files:
 - `relay/common/stream_status_test.go`
 - `relay/helper/stream_scanner_test.go`
 
+### 2026-07-18 Responses Large-Context Memory Fix
+
+The production host has 2 GiB RAM and no swap. On July 18, five kernel OOM
+events killed `new-api` while several large-context `/v1/responses` streams ran
+concurrently. The same rc.21 behavior is reported upstream in issue #6159.
+
+The local fix keeps Codex request and session behavior unchanged while bounding
+the response path:
+
+- Responses SSE events are decoded into a minimal usage/item/output view rather
+  than the complete response object graph;
+- only direct Responses streams use synchronous event handoff, while every
+  other stream format keeps the established ten-event buffer;
+- Responses SSE frames are written without formatting another full-size payload
+  copy, downstream write failures immediately close the upstream body, and a
+  terminal event's usage is retained even if that downstream write fails;
+- self-use Codex Responses no longer retain the complete generated text solely
+  for abnormal-stream token fallback, avoiding another output-sized allocation;
+- in self-use mode, only `APITypeCodex` + `ChannelTypeCodex` + `/v1/responses`
+  trusts the authoritative `response.completed.usage`, skipping request-time
+  tiktoken counting and quota pre-consumption. Final usage logging and postpaid
+  settlement still use the upstream usage. The selected channel is read from
+  distributor context because request-time counting runs before `ChannelMeta`
+  initialization. All other API/channel combinations keep normal local counting
+  and pre-consumption;
+- Codex original-body forwarding uses a shallow request shell for model mapping
+  instead of deep-copying large input/tool raw messages, and built-in tool usage
+  metadata is extracted directly from raw JSON without building a generic map
+  object graph.
+
+The optimization does not change original-body forwarding, Codex subscription
+authentication headers, function-call terminal handling, `previous_response_id`,
+or cache token fields.
+
+Relevant files:
+
+- `controller/relay.go`
+- `dto/openai_response.go`
+- `relay/channel/openai/relay_responses.go`
+- `relay/helper/common.go`
+- `relay/helper/stream_scanner.go`
+
 ### Failed Channel Retry Cycling
 
 The July 2 failed-channel retry strategy is preserved on this branch.

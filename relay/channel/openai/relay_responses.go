@@ -7,11 +7,13 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
@@ -79,17 +81,26 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	var usage = &dto.Usage{}
 	var responseTextBuilder strings.Builder
+	collectFallbackOutput := !(operation_setting.SelfUseModeEnabled &&
+		info != nil && info.ChannelMeta != nil &&
+		info.RelayFormat == types.RelayFormatOpenAIResponses &&
+		info.ApiType == constant.APITypeCodex &&
+		info.ChannelType == constant.ChannelTypeCodex)
 
-	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+	// Responses events can contain complete request/response snapshots. Use a
+	// synchronous handoff only for this format so concurrent large-context
+	// sessions cannot queue ten multi-MiB events each; other stream formats keep
+	// StreamScannerHandler's established buffering behavior.
+	helper.StreamScannerHandlerWithDataBufferSize(c, resp, info, 0, func(data string, sr *helper.StreamResult) {
 
 		// 检查当前数据是否包含 completed 状态和 usage 信息
-		var streamResponse dto.ResponsesStreamResponse
+		var streamResponse dto.ResponsesBillingStreamResponse
 		if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 			logger.LogError(c, "failed to unmarshal stream response: "+err.Error())
 			sr.Error(err)
 			return
 		}
-		sendResponsesStreamData(c, streamResponse, data)
+		completed := false
 		switch streamResponse.Type {
 		case "response.completed":
 			if streamResponse.Response != nil {
@@ -108,19 +119,19 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 						usage.PromptTokensDetails.CacheWriteTokens = streamResponse.Response.Usage.InputTokensDetails.CacheWriteTokens
 					}
 				}
-				if streamResponse.Response.HasImageGenerationCall() {
+				if quality, size, ok := streamResponse.Response.ImageGenerationCall(); ok {
 					c.Set("image_generation_call", true)
-					c.Set("image_generation_call_quality", streamResponse.Response.GetQuality())
-					c.Set("image_generation_call_size", streamResponse.Response.GetSize())
+					c.Set("image_generation_call_quality", quality)
+					c.Set("image_generation_call_size", size)
 				}
 			}
-			// response.completed is the semantic terminal event for Responses SSE.
-			// Codex may close the downstream stream immediately after this event
-			// while continuing the same session, so do not wait for a later EOF.
-			sr.Done()
+			completed = true
 		case "response.output_text.delta":
-			// 处理输出文本
-			responseTextBuilder.WriteString(streamResponse.Delta)
+			// Self-use Codex Responses trusts terminal upstream usage and does not
+			// retain the whole generated text solely for abnormal-stream fallback.
+			if collectFallbackOutput {
+				responseTextBuilder.WriteString(streamResponse.Delta)
+			}
 		case dto.ResponsesOutputTypeItemDone:
 			// 函数调用处理
 			if streamResponse.Item != nil {
@@ -144,9 +155,26 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				info.StreamStatus.MarkClientCloseExpected()
 			}
 		}
+
+		if err := sendResponsesStreamData(c, streamResponse.Type, data); err != nil {
+			// Usage from response.completed has already been captured above. A
+			// failed downstream write means no consumer remains, so stop immediately
+			// and let StreamScannerHandler close the upstream body.
+			if info != nil && info.StreamStatus != nil {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, err)
+			}
+			sr.Stop(err)
+			return
+		}
+		if completed {
+			// response.completed is the semantic terminal event for Responses SSE.
+			// Codex may close the downstream stream immediately after this event
+			// while continuing the same session, so do not wait for a later EOF.
+			sr.Done()
+		}
 	})
 
-	if usage.CompletionTokens == 0 {
+	if collectFallbackOutput && usage.CompletionTokens == 0 {
 		// 计算输出文本的 token 数量
 		tempStr := responseTextBuilder.String()
 		if len(tempStr) > 0 {

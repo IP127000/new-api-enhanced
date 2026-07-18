@@ -67,13 +67,23 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		)
 	}
 
-	request, err := common.DeepCopy(responsesReq)
-	if err != nil {
-		return types.NewError(fmt.Errorf("failed to copy request to GeneralOpenAIRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+	useCodexOriginalBody := shouldUseCodexOriginalResponsesBody(info)
+	var request *dto.OpenAIResponsesRequest
+	if useCodexOriginalBody {
+		// The Codex path forwards the original stored JSON body. It only needs a
+		// separate Model field for ModelMappedHelper, so a shallow struct copy
+		// avoids duplicating large Input/Tools/Instructions RawMessages.
+		requestCopy := *responsesReq
+		request = &requestCopy
+	} else {
+		copiedRequest, err := common.DeepCopy(responsesReq)
+		if err != nil {
+			return types.NewError(fmt.Errorf("failed to copy request to GeneralOpenAIRequest: %w", err), types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+		}
+		request = copiedRequest
 	}
 
-	err = helper.ModelMappedHelper(c, info, request)
-	if err != nil {
+	if err := helper.ModelMappedHelper(c, info, request); err != nil {
 		return types.NewError(err, types.ErrorCodeChannelModelMappedError, types.ErrOptionWithSkipRetry())
 	}
 
@@ -83,7 +93,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	}
 	adaptor.Init(info)
 	var requestBody io.Reader
-	if shouldUseCodexOriginalResponsesBody(info) {
+	if useCodexOriginalBody {
 		if err := relaycommon.ApplyCodexClientHeaderPassthroughWithRelayInfo(info); err != nil {
 			return newAPIErrorFromParamOverride(err)
 		}

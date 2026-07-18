@@ -3,6 +3,7 @@ package helper
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
@@ -85,12 +86,37 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 }
 
 func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data string) error {
+	return ResponseChunkDataByType(c, resp.Type, data)
+}
+
+// ResponseChunkDataByType writes a Responses SSE frame without formatting or
+// rendering the (potentially very large) JSON payload into additional strings.
+// It also returns every downstream write error so callers can promptly close
+// the upstream response instead of continuing to buffer data for a gone client.
+func ResponseChunkDataByType(c *gin.Context, eventType string, data string) error {
+	if c == nil || c.Writer == nil {
+		return errors.New("context or writer is nil")
+	}
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	if c.Writer.Header().Get("Cache-Control") == "" {
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+	}
 
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
-	c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("data: %s", data)})
+	// Keep the wire format identical to the previous CustomEvent rendering:
+	// event: <type>\ndata: <verbatim JSON>\n\n.
+	prefix := "event: " + eventType + "\ndata: "
+	if _, err := io.WriteString(c.Writer, prefix); err != nil {
+		return fmt.Errorf("write response event prefix failed: %w", err)
+	}
+	if _, err := io.WriteString(c.Writer, data); err != nil {
+		return fmt.Errorf("write response event data failed: %w", err)
+	}
+	if _, err := io.WriteString(c.Writer, "\n\n"); err != nil {
+		return fmt.Errorf("write response event terminator failed: %w", err)
+	}
 	return FlushWriter(c)
 }
 

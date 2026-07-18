@@ -26,6 +26,7 @@ const (
 	InitialScannerBufferSize    = 64 << 10  // 64KB (64*1024)
 	DefaultMaxScannerBufferSize = 128 << 20 // 64MB (64*1024*1024) default SSE buffer size
 	DefaultPingInterval         = 10 * time.Second
+	defaultStreamDataBufferSize = 10
 	// streamWriteTimeout bounds a single blocked write to a slow client so the
 	// unconditional wg.Wait() in cleanup can always finish. Without it, a slow
 	// but connected client (full TCP buffer, no server WriteTimeout) could hang
@@ -83,6 +84,20 @@ func setClientGoneEndReason(c *gin.Context, status *relaycommon.StreamStatus) {
 }
 
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
+	streamScannerHandler(c, resp, info, defaultStreamDataBufferSize, dataHandler)
+}
+
+// StreamScannerHandlerWithDataBufferSize lets memory-sensitive stream formats
+// opt into a smaller queue without changing the established buffering behavior
+// of every other relay format. A size of zero uses synchronous handoff.
+func StreamScannerHandlerWithDataBufferSize(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, dataHandler func(data string, sr *StreamResult)) {
+	if dataBufferSize < 0 {
+		dataBufferSize = 0
+	}
+	streamScannerHandler(c, resp, info, dataBufferSize, dataHandler)
+}
+
+func streamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataBufferSize int, dataHandler func(data string, sr *StreamResult)) {
 
 	if resp == nil || dataHandler == nil {
 		return
@@ -202,7 +217,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		})
 	}
 
-	dataChan := make(chan string, 10)
+	dataChan := make(chan string, dataBufferSize)
 
 	wg.Add(1)
 	gopool.Go(func() {
@@ -280,6 +295,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				case <-ctx.Done():
 					return
 				case <-stopChan:
+					return
+				case <-c.Request.Context().Done():
+					setClientGoneEndReason(c, info.StreamStatus)
 					return
 				}
 			} else {

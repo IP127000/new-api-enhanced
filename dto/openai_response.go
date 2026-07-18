@@ -427,6 +427,52 @@ type ResponsesStreamResponse struct {
 	Part         *ResponsesReasoningSummaryPart `json:"part,omitempty"`
 }
 
+// ResponsesBillingStreamResponse is the allocation-bounded view used while
+// relaying Responses SSE events. Upstream events such as response.created and
+// response.completed may contain the complete input, tools and output. Decoding
+// those events into OpenAIResponsesResponse retained large object graphs even
+// though the relay only needs usage and a few billing fields.
+type ResponsesBillingStreamResponse struct {
+	Type     string                    `json:"type"`
+	Response *ResponsesBillingResponse `json:"response,omitempty"`
+	Delta    string                    `json:"delta,omitempty"`
+	Item     *ResponsesBillingItem     `json:"item,omitempty"`
+}
+
+type ResponsesBillingResponse struct {
+	Usage  *ResponsesBillingUsage   `json:"usage,omitempty"`
+	Output []ResponsesBillingOutput `json:"output,omitempty"`
+}
+
+type ResponsesBillingUsage struct {
+	InputTokens        int                `json:"input_tokens"`
+	OutputTokens       int                `json:"output_tokens"`
+	TotalTokens        int                `json:"total_tokens"`
+	InputTokensDetails *InputTokenDetails `json:"input_tokens_details,omitempty"`
+}
+
+type ResponsesBillingOutput struct {
+	Type    string `json:"type"`
+	Quality string `json:"quality,omitempty"`
+	Size    string `json:"size,omitempty"`
+}
+
+type ResponsesBillingItem struct {
+	Type string `json:"type"`
+}
+
+func (r *ResponsesBillingResponse) ImageGenerationCall() (quality string, size string, ok bool) {
+	if r == nil {
+		return "", "", false
+	}
+	for _, output := range r.Output {
+		if output.Type == ResponsesOutputTypeImageGenerationCall {
+			return output.Quality, output.Size, true
+		}
+	}
+	return "", "", false
+}
+
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构
 func GetOpenAIError(errorField any) *types.OpenAIError {
 	if errorField == nil {

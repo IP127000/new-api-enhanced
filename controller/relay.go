@@ -124,8 +124,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		return
 	}
 
+	useUpstreamResponsesUsage := shouldUseCodexResponsesUpstreamUsageOnly(c, relayInfo)
 	needSensitiveCheck := setting.ShouldCheckPromptSensitive()
-	needCountToken := constant.CountToken
+	needCountToken := constant.CountToken && !useUpstreamResponsesUsage
 	// Avoid building huge CombineText (strings.Join) when token counting and sensitive check are both disabled.
 	var meta *types.TokenCountMeta
 	if needSensitiveCheck || needCountToken {
@@ -143,10 +144,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 	}
 
-	tokens, err := service.EstimateRequestToken(c, meta, relayInfo)
-	if err != nil {
-		newAPIError = types.NewError(err, types.ErrorCodeCountTokenFailed)
-		return
+	tokens := 0
+	if !useUpstreamResponsesUsage {
+		tokens, err = service.EstimateRequestToken(c, meta, relayInfo)
+		if err != nil {
+			newAPIError = types.NewError(err, types.ErrorCodeCountTokenFailed)
+			return
+		}
 	}
 
 	relayInfo.SetEstimatePromptTokens(tokens)
@@ -161,6 +165,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 	if priceData.FreeModel {
 		logger.LogInfo(c, fmt.Sprintf("模型 %s 免费，跳过预扣费", relayInfo.OriginModelName))
+	} else if useUpstreamResponsesUsage {
+		// This private fork runs Codex subscription Responses in self-use mode.
+		// The terminal response.completed event supplies authoritative usage, so
+		// avoid an expensive local tiktoken pass and settle postpaid from upstream
+		// usage. Abnormal streams without usage are logged as such by the normal
+		// Responses fallback path instead of pre-counting a huge prompt.
+		logger.LogInfo(c, "自用模式 Codex Responses 使用上游 usage，跳过本地 token 统计和预扣费")
 	} else {
 		newAPIError = service.PreConsumeBilling(c, priceData.QuotaToPreConsume, relayInfo)
 		if newAPIError != nil {
@@ -273,6 +284,20 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // 允许跨域
 	},
+}
+
+func shouldUseCodexResponsesUpstreamUsageOnly(c *gin.Context, info *relaycommon.RelayInfo) bool {
+	if !operation_setting.SelfUseModeEnabled || c == nil || info == nil || info.RelayFormat != types.RelayFormatOpenAIResponses {
+		return false
+	}
+
+	// Token counting happens before ResponsesHelper initializes ChannelMeta.
+	// The distributor has already selected the first channel and stored it in
+	// the Gin context, so use that metadata here without changing retry/channel
+	// selection semantics.
+	channelType := common.GetContextKeyInt(c, constant.ContextKeyChannelType)
+	apiType, ok := common.ChannelType2APIType(channelType)
+	return ok && apiType == constant.APITypeCodex && channelType == constant.ChannelTypeCodex
 }
 
 func addUsedChannel(c *gin.Context, channelId int) {

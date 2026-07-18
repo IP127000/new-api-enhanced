@@ -64,3 +64,24 @@ func TestGenRelayInfoCodexWebSearchTracksStandaloneCall(t *testing.T) {
 	require.Equal(t, 1, tool.CallCount)
 	require.Equal(t, "low", tool.SearchContextSize)
 }
+
+func TestGenRelayInfoResponsesExtractsToolUsageFromRawJSON(t *testing.T) {
+	t.Parallel()
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request := &dto.OpenAIResponsesRequest{
+		Model: "gpt-test",
+		Tools: []byte(`[
+			{"type":"function","name":"lookup","parameters":{"type":"object","properties":{"query":{"type":"string"}}}},
+			{"type":"web_search_preview","search_context_size":"high"},
+			{"type":"web_search"}
+		]`),
+	}
+
+	info := GenRelayInfoResponses(c, request)
+	require.Len(t, info.ResponsesUsageInfo.BuiltInTools, 3)
+	require.Equal(t, "high", info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearchPreview].SearchContextSize)
+	require.Equal(t, "medium", info.ResponsesUsageInfo.BuiltInTools[dto.BuildInToolWebSearch].SearchContextSize)
+	require.Equal(t, "function", info.ResponsesUsageInfo.BuiltInTools["function"].ToolName)
+}

@@ -397,20 +397,27 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 		BuiltInTools: make(map[string]*BuildInToolInfo),
 	}
 	if len(request.Tools) > 0 {
-		for _, tool := range request.GetToolsMap() {
-			toolType := common.Interface2String(tool["type"])
-			info.ResponsesUsageInfo.BuiltInTools[toolType] = &BuildInToolInfo{
-				ToolName:  toolType,
-				CallCount: 0,
-			}
-			switch toolType {
-			case dto.BuildInToolWebSearch, dto.BuildInToolWebSearchPreview:
-				searchContextSize := common.Interface2String(tool["search_context_size"])
-				if searchContextSize == "" {
-					searchContextSize = "medium"
+		tools := gjson.ParseBytes(request.Tools)
+		if tools.IsArray() {
+			tools.ForEach(func(_, tool gjson.Result) bool {
+				toolType := tool.Get("type").String()
+				if toolType == "" {
+					return true
 				}
-				info.ResponsesUsageInfo.BuiltInTools[toolType].SearchContextSize = searchContextSize
-			}
+				info.ResponsesUsageInfo.BuiltInTools[toolType] = &BuildInToolInfo{
+					ToolName:  toolType,
+					CallCount: 0,
+				}
+				switch toolType {
+				case dto.BuildInToolWebSearch, dto.BuildInToolWebSearchPreview:
+					searchContextSize := tool.Get("search_context_size").String()
+					if searchContextSize == "" {
+						searchContextSize = "medium"
+					}
+					info.ResponsesUsageInfo.BuiltInTools[toolType].SearchContextSize = searchContextSize
+				}
+				return true
+			})
 		}
 	}
 	return info
