@@ -173,19 +173,24 @@ The optimization does not change original-body forwarding, Codex subscription
 authentication headers, function-call terminal handling, `previous_response_id`,
 or cache token fields.
 
-Production deployment completed on July 18:
+Follow-up production deployment completed on July 18:
 
-- current image/container: `new-api:20260718-rootfix` /
-  `new-api-20260718-rootfix`;
-- current Caddy target: `127.0.0.1:3025`;
+- source commit: `3cf170a1`;
+- current image/container: `new-api:20260718-uploadfree` /
+  `new-api-20260718-uploadfree`;
+- current version: `v1.0.0-rc.21-uploadfree-20260718`;
+- current Caddy target: `127.0.0.1:3026`;
 - runtime memory limit: `GOMEMLIMIT=768MiB`;
+- runtime node type remains `NODE_TYPE=slave`;
 - request-body disk caching is enabled with the existing 10 MiB threshold and
   1 GiB cache limit, so larger bodies spill to temporary files without changing
   their contents;
 - online SQLite backup before the setting change:
   `/opt/new-api/backups/one-api-before-rootfix-20260718-1746.db`;
-- rollback image/container: `new-api:20260717-rc21-codex-4a7f1cb8` /
-  `new-api-20260717-rollback` (kept stopped).
+- rollback image/container: `new-api:20260718-rootfix` /
+  `new-api-20260718-rootfix` (kept stopped);
+- the superseded July 17 rollback container/image was removed after public
+  health verification.
 
 Relevant files:
 
@@ -451,11 +456,11 @@ The working deployment pattern used for the July 4 build:
 
 Current server naming convention:
 
-- current image: `new-api:20260718-rootfix`
-- current container: `new-api-20260718-rootfix`
-- current Caddy target: `127.0.0.1:3025`
-- rollback image: `new-api:20260717-rc21-codex-4a7f1cb8`
-- rollback container: `new-api-20260717-rollback`
+- current image: `new-api:20260718-uploadfree`
+- current container: `new-api-20260718-uploadfree`
+- current Caddy target: `127.0.0.1:3026`
+- rollback image: `new-api:20260718-rootfix`
+- rollback container: `new-api-20260718-rootfix`
 
 Image/container names should stay short: `new-api` + date + one word.
 
@@ -467,7 +472,7 @@ Production container startup parameters must stay generic:
 - do not add `anyrouter` through command args, env vars, labels, links, or extra hosts
 - `anyrouter` in usage logs/token names is database/runtime data, not a Docker startup route
 
-The current `new-api-20260718-rootfix` container was inspected after deployment and has no `anyrouter` startup route.
+The current `new-api-20260718-uploadfree` container was inspected after deployment and has no `anyrouter` startup route.
 
 ### Validation Used
 
