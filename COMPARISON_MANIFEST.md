@@ -1,0 +1,536 @@
+# Complete Comparison Manifest
+
+Generated from the common ancestor `722d0366b727b82fced878af902e48363626b2fb`, local tip `b9fe8082ab66f5add816bd0347115ec9b1df6d19`, and official release commit `bde9b2f44887d34ec54799ae191d50f97914359e`.
+
+## Local-only commits (15)
+
+- `8e8277a5` 2026-07-04 — feat: update upstream enhanced codex relay
+- `9e6cc612` 2026-07-04 — fix: restore dashboard overview token stats
+- `0f3b204a` 2026-07-04 — docs: document fork branches and local changes
+- `8639a253` 2026-07-04 — chore: remove claude handoff shim
+- `1e1b0692` 2026-07-05 — fix: preserve responses stream close handling
+- `116aa2d8` 2026-07-05 — docs: clarify production startup parameters
+- `34054064` 2026-07-05 — Align dashboard counts with successful logs
+- `f6097259` 2026-07-05 — docs: record countfix deployment notes
+- `1e315aa2` 2026-07-05 — docs: update fork README notes
+- `bc9909fc` 2026-07-05 — docs: add production stop taboo
+- `b587f9a1` 2026-07-05 — chore: refresh Kendeji site icon
+- `e8ad6e14` 2026-07-06 — chore: refresh site icon with modern style
+- `40c53c1d` 2026-07-06 — chore: switch site icon to round mark
+- `ee2eee19` 2026-07-06 — chore: make round site icon transparent
+- `b9fe8082` 2026-07-06 — fix: restore failed channel retry cycling
+
+## Official-only commits (83)
+
+- `86021d8e` 2026-07-04 — Refine default web UI and backend sync handling
+- `12603a77` 2026-07-04 — fix(redemption): add status filtering and cleanup action
+- `bed4a3f9` 2026-07-04 — fix(user): trim whitespace from username and validate input
+- `4ae34175` 2026-07-04 — fix(channels): show field passthrough controls for Codex (#5902)
+- `f52b52b1` 2026-07-04 — fix: align dynamic pricing style with log details dialog sections
+- `81808d24` 2026-07-04 — fix: remove sample special usable groups leaking into pricing page
+- `5fc35e28` 2026-07-05 — fix(user): harden account email and password handling
+- `0d5995eb` 2026-07-05 — fix(auth): allow read-only access for non-disabled tokens
+- `56dbaab1` 2026-07-05 — feat(session): support opt-in Secure session cookies
+- `4a64b870` 2026-07-05 — test(user): cover self-service password update guard
+- `2281c9e3` 2026-07-05 — fix(web): refine mobile user cards
+- `043720f9` 2026-07-06 — fix: 任务差额结算后 quota 和阿里视频时长优化 (#5923)
+- `2f91d8cc` 2026-07-06 — fix(web): sync home iframe theme and language (#5917)
+- `17465b85` 2026-07-06 — fix(html): 修复 Shadow DOM 隔离渲染下深浅色模式无法自动切换的问题 (#5890)
+- `1e11dfcf` 2026-07-06 — feat(user): better messages for redeem failures
+- `df087b02` 2026-07-06 — feat(ssrf): implement SSRF protection in HTTP clients and validation functions
+- `3a876d6f` 2026-07-06 — fix(web): redirect authenticated users away from sign-up page (#5910)
+- `1e80ce03` 2026-07-06 — feat: optimize legacy top-up warning banner copy (#5851) (#5855)
+- `fc26b88f` 2026-07-06 — feat(group): enhance group ratio editor with improved visibility rules and JSON parsing
+- `153d7f01` 2026-07-06 — fix: avoid stale stream writes after client disconnect (#5710)
+- `45f0484d` 2026-07-06 — Fix/build date dns error (#5945)
+- `d0bd8aac` 2026-07-07 — fix(billing): validate quantity parameters and harden quota calculations
+- `c9943d37` 2026-07-07 — fix(billing): extend quantity validation and saturating conversions to remaining paths
+- `bae799cc` 2026-07-07 — fix(billing): surface quota saturation events for admin auditing
+- `70ea899e` 2026-07-07 — fix(model): centralize row locking in transactional flows
+- `d1abf78e` 2026-07-07 — Localized new ui to zh-TW (#5942)
+- `9b93d61b` 2026-07-07 — feat(subscription): add admin quota reset actions (#5952)
+- `48b7f491` 2026-07-07 — fix(billing): adjust quota calculation to prevent exceeding int32 limits
+- `5cbb7b0b` 2026-07-07 — docs: update system architecture requirements
+- `8f31b305` 2026-07-07 — fix(i18n): standardize locale formatting for Intl APIs
+- `becc18e3` 2026-07-07 — fix(i18n): add language detection mapping for Chinese locales
+- `3fbad6a7` 2026-07-07 — fix(price): add default token estimate for tiered expression pre-consume
+- `8bc4bf1d` 2026-07-07 — feat(docker): add cosign for signing manifests and update permissions
+- `2f5f6ba8` 2026-07-07 — feat: prepare for 5.6
+- `394b023d` 2026-07-07 — fix: keep group ratio input as string draft to allow decimal typing (#5995)
+- `fc1259f5` 2026-07-07 — refactor(price): improve handling of other ratios in PriceData
+- `a72e5082` 2026-07-07 — feat(system-info): add stale instance cleanup actions (#5953)
+- `90fa6fe6` 2026-07-07 — fix(wallet): honor configured quota units for reward transfers (#5808)
+- `6ce7305c` 2026-07-07 — feat(price): add token ratios for GPT-5.6 models
+- `57865fc1` 2026-07-08 — fix: restore default channel connection paste
+- `6a437a33` 2026-07-08 — feat(oauth): add OAuth callback URL display and copy functionality
+- `28e0115a` 2026-07-08 — fix(web): prevent browser translation from mutating React roots (#5963)
+- `97bbb7c8` 2026-07-08 — feat(pricing): enhance dynamic pricing calculations with group selection support
+- `8739c05c` 2026-07-08 — feat(web): 支持渠道列表手动调整列宽 (#5948)
+- `df01273b` 2026-07-09 — fix(web): let resized tables fill available width (#6031)
+- `a79f9691` 2026-07-09 — fix(affiliate): update referral message
+- `4645ad9d` 2026-07-09 — fix(playground): keep model selector lists in sync
+- `246d62aa` 2026-07-09 — chore: remove dead files resurrected by v1.0 launch commit (#6041)
+- `928b4750` 2026-07-09 — feat(playground): add chat parameter settings panel
+- `4e570389` 2026-07-10 — fix: use GORM v2 row locking for subscription resets (#6057)
+- `e8596cab` 2026-07-10 — fix: allow adding custom model names that differ only by case
+- `489c0458` 2026-07-10 — perf(model-pricing): optimize upstream price sync table
+- `43783286` 2026-07-10 — fix(model-pricing): polish sync channel dialog layout
+- `6869cd94` 2026-07-11 — perf(web): align table badge spacing
+- `262ab931` 2026-07-11 — ✨ style(web): unify design system across default frontend
+- `0918bdb4` 2026-07-11 — ♻️ refactor(web): consolidate design-system primitives and responsive data views
+- `9d1ca545` 2026-07-11 — ♻️ refactor(web): refine data-table cards and pricing page layout
+- `ca971413` 2026-07-11 — fix(web): allow user-activated top navigation for custom home iframe (#5955)
+- `00f1cbb6` 2026-07-11 — chore(deps): bump golang.org/x/crypto from 0.51.0 to 0.52.0 (#6096)
+- `dad57a6b` 2026-07-11 — fix: sync codex field (#6018)
+- `b2a890e7` 2026-07-11 — 🐛 fix: Fontsource asset resolution across workspace layouts
+- `621927f7` 2026-07-10 — fix(billing): reject saturated pre-consume quota
+- `d9595831` 2026-07-10 — fix(billing): improve quota handling and error reporting for pre-consume operations
+- `269e4ff3` 2026-07-11 — feat(image): enhance image stream handling with client disconnect logic and billing adjustments
+- `308e3e34` 2026-07-11 — ✨ feat(web): polish themed data views and add task log details
+- `337169e0` 2026-07-11 — revert: undo t0ng7u UI design-system refactor
+- `1b1b23d1` 2026-07-11 — revert: restore StatusBadge horizontal padding
+- `6bbddb10` 2026-07-11 — feat(timing): add timing metrics display for stream logs and enhance localization
+- `162f8792` 2026-07-11 — feat: update theme colors
+- `e4006196` 2026-07-11 — feat: enhance stale instance handling and update theme colors
+- `1250fb2e` 2026-07-11 — fix: adjust margin for StatusBadge component in logs columns
+- `c36418c8` 2026-07-11 — feat: enhance text protocol conversion and advanced custom routing (#5825)
+- `48068ce9` 2026-07-11 — feat: bill OpenAI cache_write_tokens at cache-creation price with zero clamp
+- `92d3c9d1` 2026-07-11 — fix: bound uncached remainder by prompt-max(cached,write) and forward compact prompt_cache_key
+- `7a2b9d86` 2026-07-11 — feat: enhance model search functionality with status and sync filters
+- `8283df16` 2026-07-11 — feat: add unset price models tab to model pricing settings (#6124)
+- `bde9b2f4` 2026-07-11 — fix: harden unset price models tab batch copy, feedback, and memo equality
+- `ad900bbb` 2026-07-11 — Merge remote-tracking branch `origin/main` (merge commit; listed separately because the chronological patch list above contains non-merge commits)
+
+## Files changed only by the local branch (38)
+
+- `CLAUDE.md`
+- `Dockerfile`
+- `RELEASE_NOTES.md`
+- `controller/log.go`
+- `controller/perf_metrics.go`
+- `controller/relay_retry_test.go`
+- `controller/usedata.go`
+- `model/channel_cache_retry_test.go`
+- `model/log.go`
+- `model/log_record_test.go`
+- `model/log_stat_test.go`
+- `model/option.go`
+- `model/option_test.go`
+- `model/usedata.go`
+- `model/usedata_test.go`
+- `pkg/perf_metrics/metrics.go`
+- `pkg/perf_metrics/metrics_test.go`
+- `pkg/perf_metrics/types.go`
+- `relay/channel/openai/relay_responses_test.go`
+- `relay/common/override.go`
+- `relay/common/override_test.go`
+- `relay/common/stream_status.go`
+- `relay/common/stream_status_test.go`
+- `relay/responses_handler_test.go`
+- `service/channel_affinity_template_test.go`
+- `service/channel_select.go`
+- `web/classic/public/favicon.ico`
+- `web/classic/public/logo.png`
+- `web/default/public/favicon.ico`
+- `web/default/public/logo.png`
+- `web/default/src/features/dashboard/api.ts`
+- `web/default/src/features/dashboard/components/models/models-filter-dialog.tsx`
+- `web/default/src/features/dashboard/constants.ts`
+- `web/default/src/features/dashboard/lib/filters.ts`
+- `web/default/src/features/dashboard/lib/index.ts`
+- `web/default/src/features/dashboard/types.ts`
+- `web/default/src/features/performance-metrics/api.ts`
+- `web/default/src/features/usage-logs/constants.ts`
+
+## Files changed by both sides (30)
+
+- `README.md`
+- `README.zh_CN.md`
+- `controller/relay.go`
+- `model/ability.go`
+- `model/channel_cache.go`
+- `relay/channel/openai/relay_responses.go`
+- `relay/helper/stream_scanner.go`
+- `relay/helper/stream_scanner_test.go`
+- `relay/responses_handler.go`
+- `router/api-router.go`
+- `setting/operation_setting/channel_affinity_setting.go`
+- `web/classic/rsbuild.config.ts`
+- `web/default/src/features/channels/components/dialogs/param-override-editor-dialog.tsx`
+- `web/default/src/features/dashboard/components/models/log-stat-cards.tsx`
+- `web/default/src/features/dashboard/components/models/performance-overview.tsx`
+- `web/default/src/features/dashboard/components/overview/overview-dashboard.tsx`
+- `web/default/src/features/dashboard/components/overview/performance-health-panel.tsx`
+- `web/default/src/features/dashboard/components/overview/summary-cards.tsx`
+- `web/default/src/features/dashboard/hooks/use-dashboard-config.tsx`
+- `web/default/src/features/dashboard/index.tsx`
+- `web/default/src/features/system-settings/general/channel-affinity/constants.ts`
+- `web/default/src/features/usage-logs/components/common-logs-stats.tsx`
+- `web/default/src/features/usage-logs/types.ts`
+- `web/default/src/i18n/locales/en.json`
+- `web/default/src/i18n/locales/fr.json`
+- `web/default/src/i18n/locales/ja.json`
+- `web/default/src/i18n/locales/ru.json`
+- `web/default/src/i18n/locales/vi.json`
+- `web/default/src/i18n/locales/zh.json`
+- `web/default/src/i18n/static-keys.ts`
+
+## Files changed only by official rc.21 (357)
+
+- `.env.example`
+- `.github/workflows/docker-build.yml`
+- `.github/workflows/docker-image-branch.yml`
+- `.github/workflows/electron-build.yml`
+- `.github/workflows/pr-check.yml`
+- `.github/workflows/release.yml`
+- `AGENTS.md`
+- `README.en.md`
+- `README.fr.md`
+- `README.ja.md`
+- `README.zh_TW.md`
+- `common/constants.go`
+- `common/init.go`
+- `common/quota_math.go`
+- `common/quota_math_test.go`
+- `common/session_cookie.go`
+- `common/ssrf_protection.go`
+- `common/ssrf_protection_test.go`
+- `common/sys_log.go`
+- `common/url_validator_test.go`
+- `controller/audit.go`
+- `controller/misc.go`
+- `controller/model_list_test.go`
+- `controller/model_meta.go`
+- `controller/oauth.go`
+- `controller/redemption.go`
+- `controller/subscription.go`
+- `controller/swag_video.go`
+- `controller/system_info.go`
+- `controller/task_video.go`
+- `controller/user.go`
+- `controller/video_proxy.go`
+- `docker-compose.dev.yml`
+- `docker-compose.yml`
+- `dto/billing_usage.go`
+- `dto/billing_usage_test.go`
+- `dto/channel_settings.go`
+- `dto/channel_settings_test.go`
+- `dto/claude.go`
+- `dto/gemini.go`
+- `dto/gemini_response_test.go`
+- `dto/openai_image.go`
+- `dto/openai_request.go`
+- `dto/openai_response.go`
+- `dto/openai_responses_compaction_request.go`
+- `go.mod`
+- `go.sum`
+- `i18n/keys.go`
+- `i18n/locales/en.yaml`
+- `i18n/locales/zh-CN.yaml`
+- `i18n/locales/zh-TW.yaml`
+- `main.go`
+- `middleware/auth.go`
+- `middleware/cors.go`
+- `middleware/distributor.go`
+- `model/errors.go`
+- `model/locking.go`
+- `model/locking_test.go`
+- `model/log_format_test.go`
+- `model/model_meta.go`
+- `model/pricing.go`
+- `model/pricing_endpoint_test.go`
+- `model/redemption.go`
+- `model/redemption_test.go`
+- `model/subscription.go`
+- `model/subscription_reset_test.go`
+- `model/system_instance.go`
+- `model/task.go`
+- `model/topup.go`
+- `model/user.go`
+- `model/user_update_test.go`
+- `output/posters/newapi-40k-stars-light.png`
+- `output/posters/newapi-40k-stars-light.svg`
+- `pkg/billingexpr/billingexpr_test.go`
+- `pkg/billingexpr/round.go`
+- `pkg/billingexpr/settle.go`
+- `pkg/billingexpr/settle_clamp_test.go`
+- `pkg/billingexpr/types.go`
+- `relay/channel/advancedcustom/adaptor.go`
+- `relay/channel/advancedcustom/adaptor_test.go`
+- `relay/channel/ali/adaptor.go`
+- `relay/channel/ali/image.go`
+- `relay/channel/api_request.go`
+- `relay/channel/aws/adaptor.go`
+- `relay/channel/claude/adaptor.go`
+- `relay/channel/claude/relay-claude.go`
+- `relay/channel/claude/relay_claude_test.go`
+- `relay/channel/codex/constants.go`
+- `relay/channel/gemini/adaptor.go`
+- `relay/channel/gemini/relay-gemini-native.go`
+- `relay/channel/gemini/relay-gemini.go`
+- `relay/channel/gemini/relay_gemini_usage_test.go`
+- `relay/channel/gemini/relay_responses.go`
+- `relay/channel/openai/adaptor.go`
+- `relay/channel/openai/audio.go`
+- `relay/channel/openai/chat_via_responses.go`
+- `relay/channel/openai/helper.go`
+- `relay/channel/openai/image_stream_test.go`
+- `relay/channel/openai/relay-openai.go`
+- `relay/channel/openai/relay_image.go`
+- `relay/channel/openai/relay_responses_compact.go`
+- `relay/channel/openai/responses_via_chat.go`
+- `relay/channel/task/ali/adaptor.go`
+- `relay/channel/task/gemini/billing.go`
+- `relay/channel/task/kling/adaptor.go`
+- `relay/channel/vertex/adaptor.go`
+- `relay/chat_completions_via_responses.go`
+- `relay/chat_completions_via_responses_test.go`
+- `relay/claude_handler.go`
+- `relay/common/relay_info.go`
+- `relay/common/relay_utils.go`
+- `relay/common/relay_utils_test.go`
+- `relay/gemini_handler.go`
+- `relay/helper/common.go`
+- `relay/helper/max_tokens_bounds_test.go`
+- `relay/helper/openai_image_request_test.go`
+- `relay/helper/price.go`
+- `relay/helper/price_test.go`
+- `relay/helper/valid_request.go`
+- `relay/image_handler.go`
+- `relay/mjproxy_handler.go`
+- `relay/relay_task.go`
+- `service/billing.go`
+- `service/billing_usage.go`
+- `service/convert.go`
+- `service/convert_test.go`
+- `service/download.go`
+- `service/http_client.go`
+- `service/log_info_generate.go`
+- `service/pre_consume_quota.go`
+- `service/protected_fetch_client.go`
+- `service/protected_fetch_client_test.go`
+- `service/quota.go`
+- `service/quota_saturation_test.go`
+- `service/relayconvert/internal/claude_messages/to_oai_chat_req.go`
+- `service/relayconvert/internal/claude_messages/to_oai_chat_resp.go`
+- `service/relayconvert/internal/gemini_chat/to_oai_chat_req.go`
+- `service/relayconvert/internal/gemini_chat/to_oai_chat_resp.go`
+- `service/relayconvert/internal/jsonutil/stringify.go`
+- `service/relayconvert/internal/matcher/regex.go`
+- `service/relayconvert/internal/media/media.go`
+- `service/relayconvert/internal/meta/relay_info.go`
+- `service/relayconvert/internal/oai_chat/to_claude_messages_req.go`
+- `service/relayconvert/internal/oai_chat/to_claude_messages_resp.go`
+- `service/relayconvert/internal/oai_chat/to_claude_messages_resp_test.go`
+- `service/relayconvert/internal/oai_chat/to_gemini_chat_req.go`
+- `service/relayconvert/internal/oai_chat/to_gemini_chat_resp.go`
+- `service/relayconvert/internal/oai_chat/to_gemini_chat_resp_test.go`
+- `service/relayconvert/internal/oai_chat/to_oai_responses_policy.go`
+- `service/relayconvert/internal/oai_chat/to_oai_responses_req.go`
+- `service/relayconvert/internal/oai_chat/to_oai_responses_req_test.go`
+- `service/relayconvert/internal/oai_chat/to_oai_responses_resp.go`
+- `service/relayconvert/internal/oai_chat/to_oai_responses_resp_test.go`
+- `service/relayconvert/internal/oai_chat/to_oai_responses_stream_resp.go`
+- `service/relayconvert/internal/oai_responses/req_helpers.go`
+- `service/relayconvert/internal/oai_responses/to_claude_messages_req.go`
+- `service/relayconvert/internal/oai_responses/to_gemini_chat_req.go`
+- `service/relayconvert/internal/oai_responses/to_gemini_chat_req_preprocess.go`
+- `service/relayconvert/internal/oai_responses/to_oai_chat_req.go`
+- `service/relayconvert/internal/oai_responses/to_oai_chat_req_test.go`
+- `service/relayconvert/internal/oai_responses/to_oai_chat_resp.go`
+- `service/relayconvert/internal/oai_responses/to_oai_chat_resp_test.go`
+- `service/relayconvert/internal/oai_responses/to_oai_chat_stream_resp.go`
+- `service/relayconvert/internal/shared/claude/cache.go`
+- `service/relayconvert/internal/shared/claude/tool_choice.go`
+- `service/relayconvert/internal/shared/gemini/request.go`
+- `service/relayconvert/internal/shared/gemini/schema.go`
+- `service/relayconvert/media.go`
+- `service/relayconvert/request_compat.go`
+- `service/relayconvert/request_registry.go`
+- `service/relayconvert/request_registry_test.go`
+- `service/relayconvert/response_compat.go`
+- `service/relayconvert/response_registry.go`
+- `service/relayconvert/response_registry_test.go`
+- `service/relayconvert/text_converter_registry.go`
+- `service/relayconvert/text_converter_registry_test.go`
+- `service/request_converter.go`
+- `service/task_billing.go`
+- `service/task_billing_test.go`
+- `service/text_quota.go`
+- `service/text_quota_test.go`
+- `service/tiered_settle.go`
+- `service/token_counter.go`
+- `service/tool_billing.go`
+- `service/user_notify.go`
+- `service/webhook.go`
+- `setting/ratio_setting/cache_ratio.go`
+- `setting/ratio_setting/group_ratio.go`
+- `setting/ratio_setting/model_ratio.go`
+- `types/price_data.go`
+- `types/request_meta.go`
+- `web/classic/i18next.config.js`
+- `web/classic/index.html`
+- `web/classic/src/components/layout/ClassicFrontendDeprecationBanner.jsx`
+- `web/classic/src/components/layout/PageLayout.jsx`
+- `web/classic/src/components/settings/OtherSetting.jsx`
+- `web/classic/src/components/table/channels/modals/EditChannelModal.jsx`
+- `web/classic/src/constants/channel-affinity-template.constants.js`
+- `web/classic/src/helpers/frontendTheme.js`
+- `web/classic/src/helpers/index.js`
+- `web/classic/src/hooks/usage-logs/useUsageLogsData.jsx`
+- `web/classic/src/i18n/locales/en.json`
+- `web/classic/src/i18n/locales/fr.json`
+- `web/classic/src/i18n/locales/ja.json`
+- `web/classic/src/i18n/locales/ru.json`
+- `web/classic/src/i18n/locales/vi.json`
+- `web/classic/src/i18n/locales/zh-CN.json`
+- `web/classic/src/i18n/locales/zh-TW.json`
+- `web/classic/src/index.css`
+- `web/default/index.html`
+- `web/default/src/components/config-drawer.tsx`
+- `web/default/src/components/data-table/core/data-table-colgroup.tsx`
+- `web/default/src/components/data-table/core/data-table-header.tsx`
+- `web/default/src/components/data-table/core/data-table-row.tsx`
+- `web/default/src/components/data-table/core/table-sizing.ts`
+- `web/default/src/components/data-table/hooks/use-data-table.ts`
+- `web/default/src/components/data-table/layout/card-row-content.tsx`
+- `web/default/src/components/drawer-layout.ts`
+- `web/default/src/components/html-content.tsx`
+- `web/default/src/components/language-switcher.tsx`
+- `web/default/src/components/model-group-selector-layout.ts`
+- `web/default/src/components/model-group-selector.tsx`
+- `web/default/src/components/multi-select.tsx`
+- `web/default/src/components/ui/icon-badge.tsx`
+- `web/default/src/components/ui/input.tsx`
+- `web/default/src/components/ui/sidebar.tsx`
+- `web/default/src/components/ui/table.tsx`
+- `web/default/src/components/ui/titled-card.tsx`
+- `web/default/src/features/channels/components/channels-columns.tsx`
+- `web/default/src/features/channels/components/channels-table.tsx`
+- `web/default/src/features/channels/components/dialogs/advanced-custom-editor-dialog.tsx`
+- `web/default/src/features/channels/components/dialogs/balance-query-dialog.tsx`
+- `web/default/src/features/channels/components/drawers/channel-mutate-drawer.tsx`
+- `web/default/src/features/channels/components/drawers/sections/channel-api-access-section.tsx`
+- `web/default/src/features/channels/components/drawers/sections/channel-basic-section.tsx`
+- `web/default/src/features/channels/components/drawers/sections/channel-models-section.tsx`
+- `web/default/src/features/channels/lib/advanced-custom.ts`
+- `web/default/src/features/channels/lib/channel-form.ts`
+- `web/default/src/features/channels/types.ts`
+- `web/default/src/features/dashboard/components/flow/flow-charts.tsx`
+- `web/default/src/features/dashboard/components/models/consumption-distribution-chart.tsx`
+- `web/default/src/features/dashboard/components/models/model-charts.tsx`
+- `web/default/src/features/dashboard/components/overview/announcements-panel.tsx`
+- `web/default/src/features/dashboard/components/overview/api-info-panel.tsx`
+- `web/default/src/features/dashboard/components/overview/faq-panel.tsx`
+- `web/default/src/features/dashboard/components/overview/uptime-panel.tsx`
+- `web/default/src/features/dashboard/components/ui/stat-card.tsx`
+- `web/default/src/features/dashboard/components/users/user-charts.tsx`
+- `web/default/src/features/home/index.tsx`
+- `web/default/src/features/keys/components/api-key-timestamp-cell.tsx`
+- `web/default/src/features/keys/components/api-keys-cells.tsx`
+- `web/default/src/features/keys/components/api-keys-columns.tsx`
+- `web/default/src/features/keys/components/api-keys-mutate-drawer.tsx`
+- `web/default/src/features/keys/components/api-keys-table.tsx`
+- `web/default/src/features/keys/components/data-table-row-actions.tsx`
+- `web/default/src/features/models/components/dialogs/view-logs-dialog.tsx`
+- `web/default/src/features/models/components/models-columns.tsx`
+- `web/default/src/features/models/components/models-table.tsx`
+- `web/default/src/features/playground/components/input/playground-input-tools.tsx`
+- `web/default/src/features/playground/components/input/playground-input.tsx`
+- `web/default/src/features/playground/components/input/playground-parameter-panel.tsx`
+- `web/default/src/features/playground/index.tsx`
+- `web/default/src/features/playground/lib/index.ts`
+- `web/default/src/features/playground/lib/parameters/playground-parameters.ts`
+- `web/default/src/features/pricing/components/dynamic-pricing-breakdown.tsx`
+- `web/default/src/features/pricing/components/model-billing-mode-badge.tsx`
+- `web/default/src/features/pricing/components/model-card-grid.tsx`
+- `web/default/src/features/pricing/components/model-card.tsx`
+- `web/default/src/features/pricing/components/model-details.tsx`
+- `web/default/src/features/pricing/components/pricing-columns.tsx`
+- `web/default/src/features/pricing/components/pricing-sidebar.tsx`
+- `web/default/src/features/pricing/components/pricing-table.tsx`
+- `web/default/src/features/pricing/index.tsx`
+- `web/default/src/features/pricing/lib/dynamic-price.ts`
+- `web/default/src/features/pricing/lib/model-helpers.ts`
+- `web/default/src/features/pricing/lib/price.ts`
+- `web/default/src/features/profile/components/checkin-calendar-card.tsx`
+- `web/default/src/features/profile/components/language-preferences-card.tsx`
+- `web/default/src/features/profile/components/passkey-card.tsx`
+- `web/default/src/features/profile/components/profile-header.tsx`
+- `web/default/src/features/profile/components/profile-security-card.tsx`
+- `web/default/src/features/profile/components/profile-settings-card.tsx`
+- `web/default/src/features/profile/components/sidebar-modules-card.tsx`
+- `web/default/src/features/profile/components/two-fa-card.tsx`
+- `web/default/src/features/redemption-codes/api.ts`
+- `web/default/src/features/redemption-codes/components/data-table-bulk-actions.tsx`
+- `web/default/src/features/redemption-codes/components/redemptions-mobile-list.tsx`
+- `web/default/src/features/redemption-codes/components/redemptions-primary-buttons.tsx`
+- `web/default/src/features/redemption-codes/components/redemptions-table.tsx`
+- `web/default/src/features/redemption-codes/constants.ts`
+- `web/default/src/features/redemption-codes/types.ts`
+- `web/default/src/features/subscriptions/api.ts`
+- `web/default/src/features/subscriptions/components/data-table-row-actions.tsx`
+- `web/default/src/features/subscriptions/components/dialogs/reset-subscriptions-dialog.tsx`
+- `web/default/src/features/subscriptions/components/dialogs/user-subscriptions-dialog.tsx`
+- `web/default/src/features/subscriptions/components/subscriptions-dialogs.tsx`
+- `web/default/src/features/subscriptions/components/subscriptions-mutate-drawer.tsx`
+- `web/default/src/features/subscriptions/types.ts`
+- `web/default/src/features/system-info/api.ts`
+- `web/default/src/features/system-info/components/system-instances-panel.tsx`
+- `web/default/src/features/system-info/components/system-tasks-panel.tsx`
+- `web/default/src/features/system-info/types.ts`
+- `web/default/src/features/system-settings/auth/custom-oauth/components/preset-selector.tsx`
+- `web/default/src/features/system-settings/auth/custom-oauth/components/provider-form-dialog.tsx`
+- `web/default/src/features/system-settings/auth/custom-oauth/custom-oauth-section.tsx`
+- `web/default/src/features/system-settings/auth/index.tsx`
+- `web/default/src/features/system-settings/auth/oauth-callback-url.ts`
+- `web/default/src/features/system-settings/auth/oauth-section.tsx`
+- `web/default/src/features/system-settings/auth/section-registry.tsx`
+- `web/default/src/features/system-settings/billing/section-registry.tsx`
+- `web/default/src/features/system-settings/components/settings-page.tsx`
+- `web/default/src/features/system-settings/general/quota-settings-section.tsx`
+- `web/default/src/features/system-settings/models/channel-selector-dialog.tsx`
+- `web/default/src/features/system-settings/models/constants.ts`
+- `web/default/src/features/system-settings/models/group-ratio-form.tsx`
+- `web/default/src/features/system-settings/models/group-ratio-visual-editor.tsx`
+- `web/default/src/features/system-settings/models/group-special-usable-editor.tsx`
+- `web/default/src/features/system-settings/models/model-pricing-snapshots.ts`
+- `web/default/src/features/system-settings/models/model-ratio-form.tsx`
+- `web/default/src/features/system-settings/models/model-ratio-table-columns.tsx`
+- `web/default/src/features/system-settings/models/model-ratio-visual-editor.tsx`
+- `web/default/src/features/system-settings/models/ratio-settings-card.tsx`
+- `web/default/src/features/system-settings/models/upstream-ratio-sync-columns.tsx`
+- `web/default/src/features/system-settings/models/upstream-ratio-sync-helpers.ts`
+- `web/default/src/features/system-settings/models/upstream-ratio-sync-table.tsx`
+- `web/default/src/features/system-settings/models/upstream-ratio-sync.tsx`
+- `web/default/src/features/system-settings/types.ts`
+- `web/default/src/features/usage-logs/components/columns/common-logs-columns.tsx`
+- `web/default/src/features/usage-logs/components/common-logs-filter-bar.tsx`
+- `web/default/src/features/usage-logs/components/dialogs/audio-preview-dialog.tsx`
+- `web/default/src/features/usage-logs/components/dialogs/details-dialog.tsx`
+- `web/default/src/features/usage-logs/components/logs-filter-toolbar.tsx`
+- `web/default/src/features/usage-logs/components/task-logs-filter-bar.tsx`
+- `web/default/src/features/usage-logs/components/timing-metrics-cell.tsx`
+- `web/default/src/features/usage-logs/components/usage-logs-mobile-card.tsx`
+- `web/default/src/features/usage-logs/components/usage-logs-provider.tsx`
+- `web/default/src/features/usage-logs/components/usage-logs-table.tsx`
+- `web/default/src/features/usage-logs/index.tsx`
+- `web/default/src/features/users/components/users-columns.tsx`
+- `web/default/src/features/wallet/components/affiliate-rewards-card.tsx`
+- `web/default/src/features/wallet/components/dialogs/transfer-dialog.tsx`
+- `web/default/src/features/wallet/components/recharge-form-card.tsx`
+- `web/default/src/features/wallet/components/subscription-plans-card.tsx`
+- `web/default/src/features/wallet/components/wallet-stats-card.tsx`
+- `web/default/src/features/wallet/constants.ts`
+- `web/default/src/i18n/config.ts`
+- `web/default/src/i18n/languages.ts`
+- `web/default/src/i18n/locales/_reports/_sync-report.json`
+- `web/default/src/i18n/locales/zh-TW.json`
+- `web/default/src/lib/avatar.ts`
+- `web/default/src/lib/channel-connection-info.ts`
+- `web/default/src/lib/theme-customization.ts`
+- `web/default/src/routes/(auth)/sign-up.tsx`
+- `web/default/src/routes/_authenticated/redemption-codes/index.tsx`
+- `web/default/src/styles/theme-presets.css`
+- `web/default/src/styles/theme.css`
+- `web/default/src/tanstack-table.d.ts`
