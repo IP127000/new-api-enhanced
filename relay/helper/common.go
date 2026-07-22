@@ -30,13 +30,41 @@ func FlushWriter(c *gin.Context) (err error) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
+	// Gin's responseWriter implements http.Flusher with a no-error Flush method.
+	// Calling only that method hides the underlying net/http FlushError result,
+	// so a terminal SSE frame can be recorded as delivered even when the
+	// connection failed while the server was flushing it. Unwrap transparent
+	// response-writer layers first and invoke the underlying error-aware flush
+	// exactly once. Calling Gin's Flush and then FlushError would double-flush;
+	// Codex may close immediately after the first successful terminal flush, so
+	// that second call could falsely turn a delivered frame into client_gone.
+	writer := http.ResponseWriter(c.Writer)
+	for {
+		if flusher, ok := writer.(interface{ FlushError() error }); ok {
+			if err := flusher.FlushError(); err != nil {
+				return fmt.Errorf("flush response failed: %w", err)
+			}
+			return nil
+		}
+
+		unwrapper, ok := writer.(interface {
+			Unwrap() http.ResponseWriter
+		})
+		if ok {
+			next := unwrapper.Unwrap()
+			if next == nil || next == writer {
+				return errors.New("streaming error: invalid response writer unwrap")
+			}
+			writer = next
+			continue
+		}
+
+		if flusher, ok := c.Writer.(http.Flusher); ok {
+			flusher.Flush()
+			return nil
+		}
 		return errors.New("streaming error: flusher not found")
 	}
-
-	flusher.Flush()
-	return nil
 }
 
 func requestContextDone(c *gin.Context) bool {
@@ -108,16 +136,76 @@ func ResponseChunkDataByType(c *gin.Context, eventType string, data string) erro
 	// Keep the wire format identical to the previous CustomEvent rendering:
 	// event: <type>\ndata: <verbatim JSON>\n\n.
 	prefix := "event: " + eventType + "\ndata: "
-	if _, err := io.WriteString(c.Writer, prefix); err != nil {
+	if err := writeStringAll(c.Writer, prefix); err != nil {
 		return fmt.Errorf("write response event prefix failed: %w", err)
 	}
-	if _, err := io.WriteString(c.Writer, data); err != nil {
+	if err := writeStringAll(c.Writer, data); err != nil {
 		return fmt.Errorf("write response event data failed: %w", err)
 	}
-	if _, err := io.WriteString(c.Writer, "\n\n"); err != nil {
+	if err := writeStringAll(c.Writer, "\n\n"); err != nil {
 		return fmt.Errorf("write response event terminator failed: %w", err)
 	}
 	return FlushWriter(c)
+}
+
+// ResponseChunkDataBytesByType writes a Responses SSE frame directly from the
+// scanner-owned payload. The caller must keep data valid until this function
+// returns and must not mutate it concurrently.
+func ResponseChunkDataBytesByType(c *gin.Context, eventType string, data []byte) error {
+	if c == nil || c.Writer == nil {
+		return errors.New("context or writer is nil")
+	}
+	if requestContextDone(c) {
+		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
+	}
+	c.Writer.Header().Set("Content-Type", "text/event-stream")
+	if c.Writer.Header().Get("Cache-Control") == "" {
+		c.Writer.Header().Set("Cache-Control", "no-cache")
+	}
+
+	prefix := "event: " + eventType + "\ndata: "
+	if err := writeStringAll(c.Writer, prefix); err != nil {
+		return fmt.Errorf("write response event prefix failed: %w", err)
+	}
+	if err := writeBytesAll(c.Writer, data); err != nil {
+		return fmt.Errorf("write response event data failed: %w", err)
+	}
+	if err := writeStringAll(c.Writer, "\n\n"); err != nil {
+		return fmt.Errorf("write response event terminator failed: %w", err)
+	}
+	return FlushWriter(c)
+}
+
+func writeStringAll(writer io.Writer, data string) error {
+	for len(data) > 0 {
+		n, err := io.WriteString(writer, data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func writeBytesAll(writer io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := writer.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 func StringData(c *gin.Context, str string) error {
@@ -142,7 +230,7 @@ func PingData(c *gin.Context) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
+	if err := writeBytesAll(c.Writer, []byte(": PING\n\n")); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}
 	return FlushWriter(c)

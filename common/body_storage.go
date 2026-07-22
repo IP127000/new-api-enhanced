@@ -186,17 +186,14 @@ func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string
 	}
 
 	// 从 reader 读取并写入文件
-	written, err := io.Copy(file, io.LimitReader(reader, maxBytes+1))
+	written, err := copyBodyWithLimit(file, reader, maxBytes)
 	if err != nil {
 		file.Close()
 		os.Remove(filePath)
+		if IsRequestBodyTooLargeError(err) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("failed to write to temp file: %w", err)
-	}
-
-	if written > maxBytes {
-		file.Close()
-		os.Remove(filePath)
-		return nil, ErrRequestBodyTooLarge
 	}
 
 	// 重置文件指针
@@ -213,6 +210,38 @@ func newDiskStorageFromReader(reader io.Reader, maxBytes int64, cachePath string
 		filePath: filePath,
 		size:     written,
 	}, nil
+}
+
+// copyBodyWithLimit copies at most maxBytes and probes for one additional
+// byte. Keeping the probe separate avoids maxBytes+1 overflowing for very
+// large configured limits while still rejecting an oversized body exactly at
+// the boundary.
+func copyBodyWithLimit(dst io.Writer, reader io.Reader, maxBytes int64) (int64, error) {
+	if maxBytes < 0 {
+		return 0, ErrRequestBodyTooLarge
+	}
+
+	written, err := io.Copy(dst, &io.LimitedReader{R: reader, N: maxBytes})
+	if err != nil {
+		return written, err
+	}
+
+	var extra [1]byte
+	for emptyReads := 0; ; emptyReads++ {
+		n, readErr := reader.Read(extra[:])
+		if n > 0 {
+			return written, ErrRequestBodyTooLarge
+		}
+		if readErr == io.EOF {
+			return written, nil
+		}
+		if readErr != nil {
+			return written, readErr
+		}
+		if emptyReads >= 99 {
+			return written, io.ErrNoProgress
+		}
+	}
 }
 
 func (d *diskStorage) Read(p []byte) (n int, err error) {
@@ -351,16 +380,72 @@ func CreateBodyStorageFromReader(reader io.Reader, contentLength int64, maxBytes
 		return storage, nil
 	}
 
+	// A chunked request or a WebSocket message reader has no usable content
+	// length. Buffer only up to the disk threshold, then prepend that bounded
+	// prefix to the still-unread stream and spool the complete body to disk.
+	// Reserving against maxBytes keeps the configured disk-cache ceiling intact;
+	// if that capacity is unavailable, retain the established memory fallback.
+	if contentLength < 0 &&
+		IsDiskCacheEnabled() &&
+		maxBytes >= 0 &&
+		IsDiskCacheAvailable(maxBytes) {
+		if threshold <= 0 {
+			storage, err := newDiskStorageFromReader(reader, maxBytes, GetDiskCachePath())
+			if err != nil {
+				if IsRequestBodyTooLargeError(err) {
+					return nil, err
+				}
+				return nil, fmt.Errorf("disk storage creation failed: %w", err)
+			}
+			IncrementDiskCacheHits()
+			return storage, nil
+		}
+
+		prefixLimit := threshold
+		if maxBytes < prefixLimit {
+			prefixLimit = maxBytes
+		}
+		prefix, err := io.ReadAll(io.LimitReader(reader, prefixLimit))
+		if err != nil {
+			return nil, err
+		}
+
+		if int64(len(prefix)) >= threshold {
+			storage, err := newDiskStorageFromReader(
+				io.MultiReader(bytes.NewReader(prefix), reader),
+				maxBytes,
+				GetDiskCachePath(),
+			)
+			if err != nil {
+				if IsRequestBodyTooLargeError(err) {
+					return nil, err
+				}
+				return nil, fmt.Errorf("disk storage creation failed: %w", err)
+			}
+			IncrementDiskCacheHits()
+			return storage, nil
+		}
+
+		// maxBytes can be lower than the disk threshold. In that case the
+		// bounded prefix may fill the entire allowed body, so probe for one
+		// additional byte before accepting it as an in-memory body.
+		if int64(len(prefix)) == maxBytes {
+			if _, err := copyBodyWithLimit(io.Discard, reader, 0); err != nil {
+				return nil, err
+			}
+		}
+		IncrementMemoryCacheHits()
+		return newMemoryStorage(prefix), nil
+	}
+
 	// 使用内存读取
-	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	var data bytes.Buffer
+	_, err := copyBodyWithLimit(&data, reader, maxBytes)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(data)) > maxBytes {
-		return nil, ErrRequestBodyTooLarge
-	}
 
-	storage, err := CreateBodyStorage(data)
+	storage, err := CreateBodyStorage(data.Bytes())
 	if err != nil {
 		return nil, err
 	}

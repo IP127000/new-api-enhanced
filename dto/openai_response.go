@@ -433,22 +433,28 @@ type ResponsesStreamResponse struct {
 // those events into OpenAIResponsesResponse retained large object graphs even
 // though the relay only needs usage and a few billing fields.
 type ResponsesBillingStreamResponse struct {
-	Type     string                    `json:"type"`
-	Response *ResponsesBillingResponse `json:"response,omitempty"`
-	Delta    string                    `json:"delta,omitempty"`
-	Item     *ResponsesBillingItem     `json:"item,omitempty"`
+	Type            string                    `json:"type"`
+	Headers         json.RawMessage           `json:"headers,omitempty"`
+	SafetyBuffering json.RawMessage           `json:"safety_buffering,omitempty"`
+	Response        *ResponsesBillingResponse `json:"response,omitempty"`
+	Delta           string                    `json:"delta,omitempty"`
+	Item            *ResponsesBillingItem     `json:"item,omitempty"`
 }
 
 type ResponsesBillingResponse struct {
-	Usage  *ResponsesBillingUsage   `json:"usage,omitempty"`
-	Output []ResponsesBillingOutput `json:"output,omitempty"`
+	ID      string                   `json:"id,omitempty"`
+	Usage   *ResponsesBillingUsage   `json:"usage,omitempty"`
+	EndTurn *bool                    `json:"end_turn,omitempty"`
+	Headers json.RawMessage          `json:"headers,omitempty"`
+	Output  []ResponsesBillingOutput `json:"output,omitempty"`
 }
 
 type ResponsesBillingUsage struct {
-	InputTokens        int                `json:"input_tokens"`
-	OutputTokens       int                `json:"output_tokens"`
-	TotalTokens        int                `json:"total_tokens"`
-	InputTokensDetails *InputTokenDetails `json:"input_tokens_details,omitempty"`
+	InputTokens         int                 `json:"input_tokens"`
+	OutputTokens        int                 `json:"output_tokens"`
+	TotalTokens         int                 `json:"total_tokens"`
+	InputTokensDetails  *InputTokenDetails  `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *OutputTokenDetails `json:"output_tokens_details,omitempty"`
 }
 
 type ResponsesBillingOutput struct {
@@ -458,7 +464,9 @@ type ResponsesBillingOutput struct {
 }
 
 type ResponsesBillingItem struct {
-	Type string `json:"type"`
+	Type  string `json:"type"`
+	Role  string `json:"role,omitempty"`
+	Phase string `json:"phase,omitempty"`
 }
 
 func (r *ResponsesBillingResponse) ImageGenerationCall() (quality string, size string, ok bool) {

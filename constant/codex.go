@@ -7,6 +7,7 @@ var codexClientPassThroughHeaders = []string{
 	"Thread-Id",
 	"Thread_id",
 	"User-Agent",
+	"Version",
 	"X-Client-Request-Id",
 	"X-Codex-Beta-Features",
 	"X-Codex-Installation-Id",

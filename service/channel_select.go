@@ -12,13 +12,18 @@ import (
 )
 
 type RetryParam struct {
-	Ctx                *gin.Context
-	TokenGroup         string
-	ModelName          string
-	RequestPath        string
-	Retry              *int
-	ExcludedChannelIDs map[int]struct{}
-	resetNextTry       bool
+	Ctx         *gin.Context
+	TokenGroup  string
+	ModelName   string
+	RequestPath string
+	// RequiredChannelType restricts selection to one channel type. A zero value
+	// preserves the established behavior. This is used by endpoint transports
+	// whose wire protocol is channel-specific (for example Codex Responses WS),
+	// so an otherwise compatible OpenAI channel cannot be selected accidentally.
+	RequiredChannelType int
+	Retry               *int
+	ExcludedChannelIDs  map[int]struct{}
+	resetNextTry        bool
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -124,7 +129,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(autoGroup, param.ModelName, priorityRetry, param.RequestPath, excludedChannelIDs(param)...)
+			channel, _ = getRandomSatisfiedChannel(param, autoGroup, priorityRetry)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -162,12 +167,32 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(param.TokenGroup, param.ModelName, param.GetRetry(), param.RequestPath, excludedChannelIDs(param)...)
+		channel, err = getRandomSatisfiedChannel(param, param.TokenGroup, param.GetRetry())
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}
 	}
 	return channel, selectGroup, nil
+}
+
+func getRandomSatisfiedChannel(param *RetryParam, group string, retry int) (*model.Channel, error) {
+	for {
+		channel, err := model.GetRandomSatisfiedChannel(
+			group,
+			param.ModelName,
+			retry,
+			param.RequestPath,
+			excludedChannelIDs(param)...,
+		)
+		if err != nil || channel == nil || param.RequiredChannelType == 0 || channel.Type == param.RequiredChannelType {
+			return channel, err
+		}
+
+		// Keep looking within the same group and priority. Excluding a
+		// mismatched candidate is connection-local and does not mutate channel
+		// state or affect ordinary requests.
+		param.ExcludeChannel(channel.Id)
+	}
 }
 
 func excludedChannelIDs(param *RetryParam) []int {

@@ -34,6 +34,7 @@ The relay also passes through selected Codex client headers while preserving the
 - `Session_id`
 - `Thread-Id`
 - `User-Agent`
+- `Version`
 - `X-Client-Request-Id`
 - `X-Codex-Beta-Features`
 - `X-Codex-Installation-Id`
@@ -53,6 +54,90 @@ Relevant files:
 - `relay/common/override.go`
 - `relay/responses_handler_test.go`
 - `relay/common/override_test.go`
+
+### 2026-07-22 Codex Responses WebSocket Relay
+
+`GET /v1/responses` now implements the Responses WebSocket v2 transport used
+by current Codex CLI releases. The implementation is deliberately limited to
+`APITypeCodex` + `ChannelTypeCodex`; ordinary OpenAI-compatible channels and
+the existing `POST /v1/responses` SSE path retain their established behavior.
+
+Protocol and routing behavior:
+
+- the downstream connection upgrades without an application subprotocol and
+  accepts text JSON `response.create` frames;
+- the selected Codex subscription channel remains fixed for the connection,
+  including token-specified channel routing and server-side OAuth/account
+  identity;
+- one persistent upstream connection is opened at
+  `/backend-api/codex/responses` with
+  `OpenAI-Beta: responses_websockets=2026-02-06`;
+- downstream bearer credentials and actor-authorization headers are never
+  forwarded; the configured channel supplies `Authorization` and
+  `chatgpt-account-id`;
+- each frame preserves its original JSON, including unknown/future fields,
+  `previous_response_id`, incremental input, tools, and client metadata. Only
+  the existing Codex model mapping and required Codex body normalization are
+  applied;
+- `response.metadata` and `response.output_item.done` are forwarded so Codex
+  can retain turn state and calculate the next incremental request;
+- `response.completed` is compacted to the continuation/billing fields needed
+  by Codex and New API, avoiding retention or retransmission of full request
+  and output snapshots.
+
+Lifecycle, safety, and accounting behavior:
+
+- `generate:false` is accepted only on the first frame as the single Codex
+  prewarm. It still runs sensitive-text policy and price initialization, does
+  not count as a successful inference, and does not create quota/log usage for
+  the input tokens ChatGPT reports as connection-setup usage;
+- every logical frame reserves total-request rate-limit capacity, while only a
+  generated `response.completed` records limiter success;
+- only one response may be active at a time. Invalid/concurrent frames close
+  the session, but an already-committed upstream request receives a bounded
+  terminal drain so actual usage is settled instead of being incorrectly
+  refunded;
+- terminal usage preserves input/cache/cache-write and output/reasoning token
+  detail, while every generated round records first-response time and response
+  counts for performance metrics;
+- downstream and upstream frame sizes use the configured request-body limit;
+  unknown-length/fragmented large frames spool to bounded temporary storage
+  rather than requiring a full in-memory copy.
+
+Validation includes persistent warmup plus incremental turns over one socket,
+server credential isolation, model-only body rewriting, future-field
+preservation, per-turn usage and affinity, rate-limit rejection, later-prewarm
+rejection, concurrent-create settlement, fragmented 413/1009 handling, and
+repeated race-detector runs.
+
+Production deployment completed on July 22, 2026:
+
+- image `new-api:20260722-respws` and container
+  `new-api-20260722-respws` run on `127.0.0.1:3035` with version
+  `v1.0.0-rc.21-respws-20260722`;
+- Caddy for `codex.kendeji.fun` targets port 3035. The previous
+  `new-api-20260720-mem1g` container remains healthy on port 3034 for immediate
+  rollback, and the pre-switch Caddy site file is kept at
+  `/root/api.conf.before-respws-20260722`;
+- isolated Codex CLI 0.144.4 tests passed both through the green localhost
+  tunnel and through public TLS/Caddy. Each test kept one Responses WebSocket
+  across the model -> shell tool -> model loop, emitted no HTTP fallback, and
+  produced exactly two generated-turn usage rows with the continuation round
+  reporting cache-read tokens; the prewarm produced no quota/log row.
+
+Relevant files:
+
+- `controller/relay_responses_websocket.go`
+- `relay/responses_websocket.go`
+- `relay/responses_websocket_test.go`
+- `relay/responses_websocket_lifecycle_test.go`
+- `relay/responses_websocket_rate_limit_test.go`
+- `relay/accounting.go`
+- `middleware/distributor.go`
+- `middleware/model-rate-limit.go`
+- `service/channel_select.go`
+- `router/relay-router.go`
+- `common/body_storage.go`
 
 ### Responses Stream `client_gone` Fix
 
@@ -173,19 +258,222 @@ The optimization does not change original-body forwarding, Codex subscription
 authentication headers, function-call terminal handling, `previous_response_id`,
 or cache token fields.
 
-Production deployment completed on July 18:
+Follow-up production deployment completed on July 18:
 
-- current image/container: `new-api:20260718-rootfix` /
-  `new-api-20260718-rootfix`;
-- current Caddy target: `127.0.0.1:3025`;
+- source commit: `3cf170a1`;
+- current image/container: `new-api:20260718-uploadfree` /
+  `new-api-20260718-uploadfree`;
+- current version: `v1.0.0-rc.21-uploadfree-20260718`;
+- current Caddy target: `127.0.0.1:3026`;
 - runtime memory limit: `GOMEMLIMIT=768MiB`;
+- runtime node type remains `NODE_TYPE=slave`;
 - request-body disk caching is enabled with the existing 10 MiB threshold and
   1 GiB cache limit, so larger bodies spill to temporary files without changing
   their contents;
 - online SQLite backup before the setting change:
   `/opt/new-api/backups/one-api-before-rootfix-20260718-1746.db`;
-- rollback image/container: `new-api:20260717-rc21-codex-4a7f1cb8` /
-  `new-api-20260717-rollback` (kept stopped).
+- rollback image/container: `new-api:20260718-rootfix` /
+  `new-api-20260718-rootfix` (kept stopped);
+- the superseded July 17 rollback container/image was removed after public
+  health verification.
+
+Operational rollback on July 19:
+
+- the `uploadfree` build was rolled back after the operator reported serious
+  runtime problems during client testing;
+- current image/container: `new-api:20260718-rootfix` /
+  `new-api-20260718-rootfix`;
+- current Caddy target: `127.0.0.1:3025`;
+- `new-api:20260718-uploadfree` / `new-api-20260718-uploadfree` is kept stopped
+  for investigation and must not be returned to production without a root-cause
+  review and a new test build;
+- no database rollback or schema change was needed.
+
+### 2026-07-19 Codex Multi-Agent Stream Preemption Fix
+
+The high `client_gone` count was separated from the request-body memory issue.
+Codex multi-agent v2 can intentionally abandon an in-flight Responses stream
+when mailbox input arrives after a completed reasoning or assistant commentary
+item. This happens before `response.completed`, so immediately closing the
+upstream loses the authoritative input/output/cache usage even though the Codex
+turn continues normally with a follow-up request.
+
+The Responses relay now handles that client behavior without restoring the
+large event queue or long-lived request-body retention:
+
+- only `APITypeCodex` + `ChannelTypeCodex` Responses streams receive a bounded
+  two-second terminal grace after downstream cancellation;
+- reasoning and assistant-commentary output items mark a following Codex client
+  close as an expected handler stop, matching the existing function-call close
+  handling;
+- no additional events are written after the downstream context is cancelled;
+- a trailing `response.completed` is still decoded during the grace period so
+  prompt, completion and cached-token usage can be recorded;
+- a silent or still-generating upstream is closed when the two-second grace
+  expires, so abandoned requests cannot leave a goroutine or response body
+  running indefinitely;
+- Responses event handoff remains synchronous, preserving the memory bound;
+- all non-Codex and non-Responses streams retain immediate client-disconnect
+  cleanup;
+- per-write SSE deadlines are cleared after each data or ping write. The rc.21
+  implementation left the deadline installed, which could turn a single-write
+  timeout into a later HTTP/2 stream reset.
+
+The official Codex client expects `response.completed` for token usage, and its
+turn-scoped `x-codex-turn-state` is required for sticky routing. Do not remove
+that response/request header synchronization as a latency workaround.
+
+Production deployment completed on July 19:
+
+- source commit: `32383c8a`;
+- current image/container: `new-api:20260719-preempt` /
+  `new-api-20260719-preempt`;
+- current version: `v1.0.0-rc.21-preempt-20260719`;
+- current Caddy target: `127.0.0.1:3027`;
+- runtime memory limit remains `GOMEMLIMIT=768MiB` and node type remains
+  `NODE_TYPE=slave`;
+- the previous `new-api:20260718-rootfix` container is stopped and retained as
+  the immediate rollback while this change is operator-tested;
+- the rejected `uploadfree` container/image and the uploaded image tarball were
+  removed after the public health check passed.
+
+Diagnostic logging deployment completed later on July 19:
+
+- source changes: `relay/helper/stream_scanner.go` and
+  `relay/channel/openai/relay_responses.go`;
+- current image/container: `new-api:20260719-diag` /
+  `new-api-20260719-diag`;
+- current version: `v1.0.0-rc.21-diag-20260719`;
+- current Caddy target: `127.0.0.1:3028`;
+- diagnostics are written only to the existing application/container logs;
+  this change adds no database tables, columns, indexes, migrations, or
+  statistics writes;
+- logs correlate request ID, upstream request ID, context error, write error,
+  expected-close state, grace start/end/expiry, terminal usage, upstream body
+  close, and final stream reason without logging request or response payloads.
+
+Operator rollback later on July 19:
+
+- the diagnostic build was removed from the public Caddy route after the
+  operator observed rapid RSS growth during testing;
+- public traffic is back on `new-api:20260719-preempt` /
+  `new-api-20260719-preempt` at `127.0.0.1:3027`;
+- `new-api:20260719-diag` remains stopped with its diagnostic log for review;
+- no database schema, migration, or statistics change was made during the
+  rollback.
+
+Follow-up memory fix prepared on July 19:
+
+- Codex Responses now uses a per-stream inline scanner/handler path; it does
+  not serialize separate HTTP requests or conversations;
+- the scanner cannot read the next complete SSE event until the current large
+  event has been parsed and forwarded, removing the previous read-ahead
+  overlap between the scanner goroutine and handler goroutine;
+- the Codex Responses handler consumes `scanner.Bytes()` directly and writes
+  the payload as bytes, eliminating the additional full-event allocation made
+  by `scanner.Text()`;
+- all other stream formats retain their existing buffered handler path;
+- no database schema, migration, or statistics write was added.
+
+Production deployment completed on July 19:
+
+- source commit: `a9afc748`;
+- current image/container: `new-api:20260719-bytes` /
+  `new-api-20260719-bytes`;
+- current version: `v1.0.0-rc.21-bytes-20260719`;
+- current Caddy target: `127.0.0.1:3030`;
+- the superseded `inline`, `preempt`, `diag`, and `rootfix` containers are
+  stopped while the operator validates the byte-stream path.
+
+### 2026-07-19 Responses Terminal Delivery Fix
+
+Production investigation of `api.kendeji.fun` separated two downstream
+symptoms from anyrouter billing success:
+
+- some consume rows ended as `client_gone` before New API decoded the first
+  upstream SSE data event, while the corresponding anyrouter request later
+  completed normally because the upstream HTTP request is intentionally not
+  bound to the downstream Gin request context;
+- during a live Codex retry, New API logged `response.completed` and
+  `end_reason=done`, but the Codex client reported a clean stream close before
+  receiving `response.completed`.
+
+The second symptom exposed a concrete delivery-accounting bug in the production
+`bytes` build. Gin's `ResponseWriter.Flush()` has no error return and hides the
+underlying Go HTTP/1.1 or HTTP/2 `FlushError`. A terminal frame could therefore
+be truncated or rejected while the relay still called `StreamResult.Done()`.
+The byte-stream writer also assumed every `Write` completed the entire slice.
+This is not a fixed first-token timeout: production has no 60-second first-token
+cutoff, and successful requests can legitimately wait longer than one minute
+before the first upstream `data:` event.
+
+This patch targets the second, terminal-delivery symptom. It does not claim to
+prevent every `received=0` cancellation: those rows mean the downstream closed
+before New API decoded a first SSE data event and require separate transport
+evidence rather than a guessed first-token threshold.
+
+The local fix, based on production source commit `a9afc748`, now:
+
+- unwraps Gin's transparent response-writer layer and calls the underlying
+  error-aware HTTP flush exactly once before declaring an SSE frame delivered;
+- avoids a second empty flush after a successful terminal delivery, because
+  Codex may close immediately after parsing `response.completed`;
+- completes or rejects short prefix, payload, and terminator writes instead of
+  silently accepting a partial SSE event;
+- applies the same complete-write handling to SSE keepalive pings;
+- marks `response.completed` as done only after its full downstream frame is
+  written and flushed; a context cancellation that skips or interrupts that
+  terminal write remains `client_gone` or the existing expected-close result;
+- serializes downstream-cancel and stream-timeout classification with an
+  in-flight SSE write, so Codex closing immediately after a successful terminal
+  flush cannot win the end-reason race and overwrite `done`;
+- preserves the bounded terminal-usage grace when the scanner observes an
+  expected cancellation before the main stream waiter sees the same signal;
+- only for `APITypeCodex` + `ChannelTypeCodex` direct Responses streams,
+  rewrites `response.completed` to the small subset consumed by the official
+  Codex client: response `id`, `usage`, `end_turn`, and response/top-level
+  headers plus safety-buffering metadata;
+- falls back to the original terminal frame when the upstream response id is
+  missing, and leaves every non-Codex/non-Responses stream byte-for-byte
+  unchanged;
+- preserves input/cache/output/reasoning token details while removing repeated
+  output, tool, and instruction snapshots from the terminal frame, reducing the
+  final write's exposure to the existing bounded per-write deadline.
+
+The official Codex SSE consumer treats a parsed `response.completed` as success
+immediately and does not wait for EOF. Do not add a post-terminal sleep/drain or
+recheck the canceled request context after a successful terminal flush; Codex
+may legitimately stop reading as soon as it has parsed the completed event.
+
+Production deployment completed on July 20:
+
+- source base: `a9afc748` plus the local terminal-delivery patch documented
+  above;
+- current image/container: `new-api:20260720-flush` /
+  `new-api-20260720-flush`;
+- current version: `v1.0.0-rc.21-flush-20260720`;
+- current Caddy target: `127.0.0.1:3031`;
+- the previous `new-api:20260719-bytes` container is stopped and retained as
+  the immediate rollback while the operator tests this build;
+- `codex.kendeji.fun` remains unchanged on `127.0.0.1:3033`;
+- the stale stopped `new-api:20260719-3cf` container/image and uploaded image
+  tarball were removed after repeated public health checks passed.
+
+Runtime memory configuration was adjusted later on July 20 without rebuilding
+the image:
+
+- host swap was absent from the Debian cloud image; a persistent 2 GiB
+  `/swapfile` was created and enabled with `vm.swappiness=10`;
+- the same production image `new-api:20260720-flush` was started blue/green as
+  container `new-api-20260720-mem1g` on `127.0.0.1:3034`;
+- `GOMEMLIMIT` was raised from `768MiB` to `1GiB`;
+- Caddy `api.kendeji.fun` was switched from `127.0.0.1:3031` to
+  `127.0.0.1:3034` after local health and configuration validation;
+- `codex.kendeji.fun` remained unchanged on `127.0.0.1:3033`;
+- the previous `new-api-20260720-flush` container is stopped and retained as
+  the immediate rollback, with `/root/rollback-new-api-flush.sh` prepared;
+- swap is an emergency OOM buffer only; it does not replace reducing large SSE
+  event allocation peaks or monitoring Go heap/RSS behavior.
 
 Relevant files:
 
@@ -454,8 +742,8 @@ Current server naming convention:
 - current image: `new-api:20260718-rootfix`
 - current container: `new-api-20260718-rootfix`
 - current Caddy target: `127.0.0.1:3025`
-- rollback image: `new-api:20260717-rc21-codex-4a7f1cb8`
-- rollback container: `new-api-20260717-rollback`
+- investigation image: `new-api:20260718-uploadfree`
+- investigation container: `new-api-20260718-uploadfree` (stopped)
 
 Image/container names should stay short: `new-api` + date + one word.
 

@@ -211,6 +211,32 @@ func TestStreamScannerHandler_DataWithExtraSpaces(t *testing.T) {
 	assert.Equal(t, "{\"trimmed\":true}", got)
 }
 
+type deadlineTrackingWriter struct {
+	gin.ResponseWriter
+	deadlines []time.Time
+}
+
+func (w *deadlineTrackingWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+func TestStreamScannerHandlerClearsPerWriteDeadline(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	tracker := &deadlineTrackingWriter{ResponseWriter: c.Writer}
+	c.Writer = tracker
+
+	resp := &http.Response{Body: io.NopCloser(strings.NewReader("data: first\ndata: [DONE]\n"))}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, DisablePing: true}
+	StreamScannerHandler(c, resp, info, func(data string, sr *StreamResult) {})
+
+	require.GreaterOrEqual(t, len(tracker.deadlines), 2)
+	require.False(t, tracker.deadlines[0].IsZero(), "the write must first receive a bounded deadline")
+	require.True(t, tracker.deadlines[len(tracker.deadlines)-1].IsZero(), "the deadline must be cleared after the write")
+}
+
 // TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns pins the
 // disconnect contract: when the client goes away, the handler must return
 // promptly (all goroutines joined, so the gin.Context can never leak into a
@@ -281,6 +307,124 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	body := recorder.Body.String()
 	assert.Contains(t, body, "first")
 	assert.NotContains(t, body, "second")
+}
+
+func TestStreamScannerHandler_ClientGoneGraceIsBounded(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(ctx)
+	resp := &http.Response{Body: pr}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, DisablePing: true}
+
+	handled := make(chan struct{})
+	done := make(chan struct{})
+	const grace = 50 * time.Millisecond
+	go func() {
+		StreamScannerHandlerWithOptions(c, resp, info, StreamScannerOptions{
+			DataBufferSize:        0,
+			ClientGoneGracePeriod: grace,
+		}, func(data string, sr *StreamResult) {
+			info.StreamStatus.MarkClientCloseExpected()
+			close(handled)
+		})
+		close(done)
+	}()
+
+	_, err := fmt.Fprint(pw, "data: first\n")
+	require.NoError(t, err)
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first event")
+	}
+
+	started := time.Now()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal grace did not close a silent upstream")
+	}
+	require.GreaterOrEqual(t, time.Since(started), grace)
+	require.Equal(t, relaycommon.StreamEndReasonHandlerStop, info.StreamStatus.EndReason)
+}
+
+func TestStreamScannerHandler_PreservesGraceWhenScannerObservesExpectedCancelFirst(t *testing.T) {
+	oldTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() {
+		_ = pr.Close()
+		_ = pw.Close()
+	})
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(reqCtx)
+	resp := &http.Response{Body: pr}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}, DisablePing: true}
+
+	firstHandled := make(chan struct{})
+	terminalHandled := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		StreamScannerHandlerWithOptions(c, resp, info, StreamScannerOptions{
+			DataBufferSize:        0,
+			InlineDataHandler:     true,
+			ClientGoneGracePeriod: time.Second,
+		}, func(data string, sr *StreamResult) {
+			if data == "first" {
+				info.StreamStatus.MarkClientCloseExpected()
+				close(firstHandled)
+				return
+			}
+			if data == "terminal" {
+				close(terminalHandled)
+				sr.Stop(nil)
+			}
+		})
+		close(done)
+	}()
+
+	_, err := fmt.Fprint(pw, "data: first\n")
+	require.NoError(t, err)
+	select {
+	case <-firstHandled:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first event")
+	}
+
+	// Make the next scanner read and the context cancellation ready together.
+	// Whichever observer wins, the existing expected handler_stop must retain
+	// the grace long enough for this terminal event to be handled.
+	cancel()
+	_, err = fmt.Fprint(pw, "data: terminal\n")
+	require.NoError(t, err)
+
+	select {
+	case <-terminalHandled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected terminal event was lost after scanner-first cancel")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not finish")
+	}
+	require.Equal(t, relaycommon.StreamEndReasonHandlerStop, info.StreamStatus.EndReason)
 }
 
 // ---------- Ping tests ----------

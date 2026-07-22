@@ -28,144 +28,204 @@ type ModelRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
+// ChannelSelectionOptions contains the routing information that is normally
+// read from an HTTP request body by Distribute. Transports such as Responses
+// WebSocket receive the model in their first data frame and can call the same
+// selector after the HTTP upgrade without duplicating token limits, affinity,
+// auto-group, or fixed-channel behavior.
+type ChannelSelectionOptions struct {
+	Model               string
+	RequestedGroup      string
+	RequestPath         string
+	ShouldSelectChannel bool
+	RequiredChannelType int
+}
+
+type ChannelSelectionError struct {
+	StatusCode int
+	Message    string
+	Code       types.ErrorCode
+}
+
+func (e *ChannelSelectionError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.Message
+}
+
+func newChannelSelectionError(statusCode int, message string, code ...types.ErrorCode) *ChannelSelectionError {
+	selectionErr := &ChannelSelectionError{StatusCode: statusCode, Message: message}
+	if len(code) > 0 {
+		selectionErr.Code = code[0]
+	}
+	return selectionErr
+}
+
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
-		var channel *model.Channel
-		channelId, ok := common.GetContextKey(c, constant.ContextKeyTokenSpecificChannelId)
 		modelRequest, shouldSelectChannel, err := getModelRequest(c)
 		if err != nil {
 			abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
-		if ok {
-			id, err := strconv.Atoi(channelId.(string))
-			if err != nil {
-				abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
-				return
-			}
-			channel, err = model.GetChannelById(id, true)
-			if err != nil {
-				abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
-				return
-			}
-			if channel.Status != common.ChannelStatusEnabled {
-				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
-				return
-			}
-		} else {
-			// Select a channel for the user
-			// check token model mapping
-			modelLimitEnable := common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled)
-			if modelLimitEnable {
-				s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
-				if !ok {
-					// token model limit is empty, all models are not allowed
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
-					return
-				}
-				var tokenModelLimit map[string]bool
-				tokenModelLimit, ok = s.(map[string]bool)
-				if !ok {
-					tokenModelLimit = map[string]bool{}
-				}
-				matchName := ratio_setting.FormatMatchingModelName(modelRequest.Model) // match gpts & thinking-*
-				if _, ok := tokenModelLimit[matchName]; !ok {
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": modelRequest.Model}))
-					return
-				}
-			}
 
-			if shouldSelectChannel {
-				if modelRequest.Model == "" {
-					abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorModelNameRequired))
-					return
-				}
-				var selectGroup string
-				usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
-				// check path is /pg/chat/completions
-				if strings.HasPrefix(c.Request.URL.Path, "/pg/chat/completions") {
-					playgroundRequest := &dto.PlayGroundRequest{}
-					err = common.UnmarshalBodyReusable(c, playgroundRequest)
-					if err != nil {
-						abortWithOpenAiMessage(c, http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidPlayground, map[string]any{"Error": err.Error()}))
-						return
-					}
-					if playgroundRequest.Group != "" {
-						if !service.GroupInUserUsableGroups(usingGroup, playgroundRequest.Group) && playgroundRequest.Group != usingGroup {
-							abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
-							return
-						}
-						usingGroup = playgroundRequest.Group
-						common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
-					}
-				}
-
-				if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, modelRequest.Model, usingGroup); found {
-					affinityUsable := false
-					preferred, err := model.CacheGetChannel(preferredChannelID)
-					if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled &&
-						channelSupportsRequestPath(preferred, c.Request.URL.Path, modelRequest.Model) {
-						if usingGroup == "auto" {
-							userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
-							autoGroups := service.GetUserAutoGroup(userGroup)
-							for _, g := range autoGroups {
-								if model.IsChannelEnabledForGroupModel(g, modelRequest.Model, preferred.Id) {
-									selectGroup = g
-									common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
-									channel = preferred
-									affinityUsable = true
-									service.MarkChannelAffinityUsed(c, g, preferred.Id)
-									break
-								}
-							}
-						} else if model.IsChannelEnabledForGroupModel(usingGroup, modelRequest.Model, preferred.Id) {
-							channel = preferred
-							selectGroup = usingGroup
-							affinityUsable = true
-							service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
-						}
-					}
-					if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
-						service.ClearCurrentChannelAffinityCache(c)
-					}
-				}
-
-				if channel == nil {
-					channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
-						Ctx:         c,
-						ModelName:   modelRequest.Model,
-						TokenGroup:  usingGroup,
-						RequestPath: c.Request.URL.Path,
-						Retry:       common.GetPointer(0),
-					})
-					if err != nil {
-						showGroup := usingGroup
-						if usingGroup == "auto" {
-							showGroup = fmt.Sprintf("auto(%s)", selectGroup)
-						}
-						message := i18n.T(c, i18n.MsgDistributorGetChannelFailed, map[string]any{"Group": showGroup, "Model": modelRequest.Model, "Error": err.Error()})
-						// 如果错误，但是渠道不为空，说明是数据库一致性问题
-						//if channel != nil {
-						//	common.SysError(fmt.Sprintf("渠道不存在：%d", channel.Id))
-						//	message = "数据库一致性已被破坏，请联系管理员"
-						//}
-						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, message, types.ErrorCodeModelNotFound)
-						return
-					}
-					if channel == nil {
-						abortWithOpenAiMessage(c, http.StatusServiceUnavailable, i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": modelRequest.Model}), types.ErrorCodeModelNotFound)
-						return
-					}
-				}
+		channel, selectionErr := SelectAndSetupChannel(c, ChannelSelectionOptions{
+			Model:               modelRequest.Model,
+			RequestedGroup:      modelRequest.Group,
+			RequestPath:         c.Request.URL.Path,
+			ShouldSelectChannel: shouldSelectChannel,
+		})
+		if selectionErr != nil {
+			if selectionErr.Code != "" {
+				abortWithOpenAiMessage(c, selectionErr.StatusCode, selectionErr.Message, selectionErr.Code)
+			} else {
+				abortWithOpenAiMessage(c, selectionErr.StatusCode, selectionErr.Message)
 			}
+			return
 		}
-		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
 		}
 	}
+}
+
+// SelectAndSetupChannel applies the same channel routing policy as Distribute
+// for callers that already parsed the model from another transport.
+func SelectAndSetupChannel(c *gin.Context, options ChannelSelectionOptions) (*model.Channel, *ChannelSelectionError) {
+	requestPath := options.RequestPath
+	if requestPath == "" && c != nil && c.Request != nil && c.Request.URL != nil {
+		requestPath = c.Request.URL.Path
+	}
+
+	var channel *model.Channel
+	channelID, fixedChannel := common.GetContextKey(c, constant.ContextKeyTokenSpecificChannelId)
+	if fixedChannel {
+		id, err := strconv.Atoi(channelID.(string))
+		if err != nil {
+			return nil, newChannelSelectionError(http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
+		}
+		channel, err = model.GetChannelById(id, true)
+		if err != nil {
+			return nil, newChannelSelectionError(http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorInvalidChannelId))
+		}
+		if channel.Status != common.ChannelStatusEnabled {
+			return nil, newChannelSelectionError(http.StatusForbidden, i18n.T(c, i18n.MsgDistributorChannelDisabled))
+		}
+		if options.RequiredChannelType != 0 && channel.Type != options.RequiredChannelType {
+			return nil, newChannelSelectionError(
+				http.StatusBadRequest,
+				fmt.Sprintf("channel #%d does not support this endpoint transport", channel.Id),
+				types.ErrorCodeGetChannelFailed,
+			)
+		}
+	} else {
+		if common.GetContextKeyBool(c, constant.ContextKeyTokenModelLimitEnabled) {
+			s, ok := common.GetContextKey(c, constant.ContextKeyTokenModelLimit)
+			if !ok {
+				return nil, newChannelSelectionError(http.StatusForbidden, i18n.T(c, i18n.MsgDistributorTokenNoModelAccess))
+			}
+			tokenModelLimit, ok := s.(map[string]bool)
+			if !ok {
+				tokenModelLimit = map[string]bool{}
+			}
+			matchName := ratio_setting.FormatMatchingModelName(options.Model)
+			if _, ok := tokenModelLimit[matchName]; !ok {
+				return nil, newChannelSelectionError(
+					http.StatusForbidden,
+					i18n.T(c, i18n.MsgDistributorTokenModelForbidden, map[string]any{"Model": options.Model}),
+				)
+			}
+		}
+
+		if options.ShouldSelectChannel {
+			if options.Model == "" {
+				return nil, newChannelSelectionError(http.StatusBadRequest, i18n.T(c, i18n.MsgDistributorModelNameRequired))
+			}
+
+			var selectGroup string
+			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+			if strings.HasPrefix(requestPath, "/pg/chat/completions") && options.RequestedGroup != "" {
+				if !service.GroupInUserUsableGroups(usingGroup, options.RequestedGroup) && options.RequestedGroup != usingGroup {
+					return nil, newChannelSelectionError(http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
+				}
+				usingGroup = options.RequestedGroup
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, usingGroup)
+			}
+
+			if preferredChannelID, found := service.GetPreferredChannelByAffinity(c, options.Model, usingGroup); found {
+				affinityUsable := false
+				preferred, err := model.CacheGetChannel(preferredChannelID)
+				typeMatches := options.RequiredChannelType == 0 || (preferred != nil && preferred.Type == options.RequiredChannelType)
+				if err == nil && preferred != nil && preferred.Status == common.ChannelStatusEnabled && typeMatches &&
+					channelSupportsRequestPath(preferred, requestPath, options.Model) {
+					if usingGroup == "auto" {
+						userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+						for _, group := range service.GetUserAutoGroup(userGroup) {
+							if model.IsChannelEnabledForGroupModel(group, options.Model, preferred.Id) {
+								selectGroup = group
+								common.SetContextKey(c, constant.ContextKeyAutoGroup, group)
+								channel = preferred
+								affinityUsable = true
+								service.MarkChannelAffinityUsed(c, group, preferred.Id)
+								break
+							}
+						}
+					} else if model.IsChannelEnabledForGroupModel(usingGroup, options.Model, preferred.Id) {
+						channel = preferred
+						selectGroup = usingGroup
+						affinityUsable = true
+						service.MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
+					}
+				}
+				if !affinityUsable && !service.ShouldKeepChannelAffinityOnChannelDisabled() {
+					service.ClearCurrentChannelAffinityCache(c)
+				}
+			}
+
+			if channel == nil {
+				var err error
+				channel, selectGroup, err = service.CacheGetRandomSatisfiedChannel(&service.RetryParam{
+					Ctx:                 c,
+					ModelName:           options.Model,
+					TokenGroup:          usingGroup,
+					RequestPath:         requestPath,
+					RequiredChannelType: options.RequiredChannelType,
+					Retry:               common.GetPointer(0),
+				})
+				if err != nil {
+					showGroup := usingGroup
+					if usingGroup == "auto" {
+						showGroup = fmt.Sprintf("auto(%s)", selectGroup)
+					}
+					message := i18n.T(c, i18n.MsgDistributorGetChannelFailed, map[string]any{
+						"Group": showGroup,
+						"Model": options.Model,
+						"Error": err.Error(),
+					})
+					return nil, newChannelSelectionError(http.StatusServiceUnavailable, message, types.ErrorCodeModelNotFound)
+				}
+				if channel == nil {
+					return nil, newChannelSelectionError(
+						http.StatusServiceUnavailable,
+						i18n.T(c, i18n.MsgDistributorNoAvailableChannel, map[string]any{"Group": usingGroup, "Model": options.Model}),
+						types.ErrorCodeModelNotFound,
+					)
+				}
+			}
+		}
+	}
+
+	common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
+	if setupErr := SetupContextForSelectedChannel(c, channel, options.Model); setupErr != nil {
+		statusCode := setupErr.StatusCode
+		if statusCode < http.StatusBadRequest {
+			statusCode = http.StatusInternalServerError
+		}
+		return nil, newChannelSelectionError(statusCode, setupErr.Error(), setupErr.GetErrorCode())
+	}
+	return channel, nil
 }
 
 // channelSupportsRequestPath reports whether a channel can serve the request path

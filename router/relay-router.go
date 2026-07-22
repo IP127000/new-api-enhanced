@@ -72,8 +72,17 @@ func SetRelayRouter(router *gin.Engine) {
 	relayV1Router.Use(middleware.RouteTag("relay"))
 	relayV1Router.Use(middleware.SystemPerformanceCheck())
 	relayV1Router.Use(middleware.TokenAuth())
+	{
+		// Responses WebSocket carries multiple logical requests on one upgraded
+		// connection. Its handler applies ModelRequestRateLimit once per
+		// response.create, so the handshake itself must not consume an additional
+		// request allowance.
+		relayV1Router.GET("/responses", controller.RelayResponsesWebSocket)
+	}
+
 	relayV1Router.Use(middleware.ModelRequestRateLimit())
 	{
+
 		// WebSocket 路由（统一到 Relay）
 		wsRouter := relayV1Router.Group("")
 		wsRouter.Use(middleware.Distribute())
