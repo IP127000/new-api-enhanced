@@ -166,6 +166,9 @@ func InitOptionMap() {
 	common.OptionMap["CheckSensitiveEnabled"] = strconv.FormatBool(setting.CheckSensitiveEnabled)
 	common.OptionMap["DemoSiteEnabled"] = strconv.FormatBool(operation_setting.DemoSiteEnabled)
 	common.OptionMap["SelfUseModeEnabled"] = strconv.FormatBool(operation_setting.SelfUseModeEnabled)
+	common.OptionMap["ApiRestrictEnabled"] = strconv.FormatBool(operation_setting.ApiRestrictEnabled)
+	common.OptionMap["ApiRestrictMessage"] = operation_setting.ApiRestrictMessage
+	common.OptionMap["ApiRestrictUserIds"] = operation_setting.ApiRestrictUserIds
 	common.OptionMap["ModelRequestRateLimitEnabled"] = strconv.FormatBool(setting.ModelRequestRateLimitEnabled)
 	common.OptionMap["CheckSensitiveOnPromptEnabled"] = strconv.FormatBool(setting.CheckSensitiveOnPromptEnabled)
 	common.OptionMap["StopOnSensitiveEnabled"] = strconv.FormatBool(setting.StopOnSensitiveEnabled)
@@ -344,6 +347,8 @@ func updateOptionMap(key string, value string) (err error) {
 			operation_setting.DemoSiteEnabled = boolValue
 		case "SelfUseModeEnabled":
 			operation_setting.SelfUseModeEnabled = boolValue
+		case "ApiRestrictEnabled":
+			operation_setting.ApiRestrictEnabled = boolValue
 		case "CheckSensitiveOnPromptEnabled":
 			setting.CheckSensitiveOnPromptEnabled = boolValue
 		case "ModelRequestRateLimitEnabled":
@@ -382,6 +387,10 @@ func updateOptionMap(key string, value string) (err error) {
 		common.SMTPToken = value
 	case "ServerAddress":
 		system_setting.ServerAddress = value
+	case "ApiRestrictMessage":
+		operation_setting.ApiRestrictMessage = value
+	case "ApiRestrictUserIds":
+		operation_setting.ApiRestrictUserIds = value
 	case "WorkerUrl":
 		system_setting.WorkerUrl = value
 	case "WorkerValidKey":

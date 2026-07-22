@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ApiRestrictSection } from '../general/api-restrict-section'
 import { SystemBehaviorSection } from '../general/system-behavior-section'
 import { EmailSettingsSection } from '../integrations/email-settings-section'
 import { MonitoringSettingsSection } from '../integrations/monitoring-settings-section'
@@ -36,6 +37,19 @@ const OPERATIONS_SECTIONS = [
           DefaultCollapseSidebar: settings.DefaultCollapseSidebar,
           DemoSiteEnabled: settings.DemoSiteEnabled,
           SelfUseModeEnabled: settings.SelfUseModeEnabled,
+        }}
+      />
+    ),
+  },
+  {
+    id: 'api-restrict',
+    titleKey: 'API Access Restriction',
+    build: (settings: OperationsSettings) => (
+      <ApiRestrictSection
+        defaultValues={{
+          ApiRestrictEnabled: settings.ApiRestrictEnabled,
+          ApiRestrictMessage: settings.ApiRestrictMessage,
+          ApiRestrictUserIds: settings.ApiRestrictUserIds,
         }}
       />
     ),

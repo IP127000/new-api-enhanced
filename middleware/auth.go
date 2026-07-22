@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 
@@ -412,6 +413,12 @@ func TokenAuth() func(c *gin.Context) {
 		userEnabled := userCache.Status == common.UserStatusEnabled
 		if !userEnabled {
 			abortWithOpenAiMessage(c, http.StatusForbidden, common.TranslateMessage(c, i18n.MsgAuthUserBanned))
+			return
+		}
+
+		// API 访问管控（维护模式）：被管控用户仍可登录后台，但其 API key 请求在此拦截并返回自定义消息。
+		if restricted, msg := operation_setting.IsUserApiRestricted(token.UserId); restricted {
+			abortWithOpenAiMessage(c, http.StatusServiceUnavailable, msg)
 			return
 		}
 

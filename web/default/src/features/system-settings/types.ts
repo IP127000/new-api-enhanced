@@ -334,6 +334,9 @@ export type OperationsSettings = {
   DefaultCollapseSidebar: boolean
   DemoSiteEnabled: boolean
   SelfUseModeEnabled: boolean
+  ApiRestrictEnabled: boolean
+  ApiRestrictMessage: string
+  ApiRestrictUserIds: string
   QuotaRemindThreshold: string
   SMTPServer: string
   SMTPPort: string
