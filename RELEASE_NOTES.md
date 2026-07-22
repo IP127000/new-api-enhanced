@@ -125,6 +125,24 @@ Production deployment completed on July 22, 2026:
   produced exactly two generated-turn usage rows with the continuation round
   reporting cache-read tokens; the prewarm produced no quota/log row.
 
+The same image was deployed later on July 22 to `api.kendeji.fun`:
+
+- container `new-api-20260722-respws` runs on `127.0.0.1:3036`, and Caddy now
+  targets port 3036;
+- the previous `new-api-20260722-restrict` container remains healthy on port
+  3035 as the immediate rollback, with the pre-switch Caddyfile saved at
+  `/root/Caddyfile.before-api-respws-20260722`;
+- an isolated Codex CLI 0.144.4 test passed first through a localhost SSH
+  tunnel and then through public TLS/Caddy using the server's enabled Codex
+  channel. Both tests kept one WebSocket across a model -> shell tool -> model
+  loop, emitted no HTTP fallback, produced exactly two generated-turn usage
+  rows, omitted prewarm billing, and reported 6,912 cache-read tokens on the
+  continuation;
+- the uploaded image tar, superseded stopped container/image, package caches,
+  local build outputs, test homes, and unreferenced build caches were removed
+  after public validation. Databases, logs, backups, and both servers' immediate
+  rollback containers were retained.
+
 Relevant files:
 
 - `controller/relay_responses_websocket.go`
