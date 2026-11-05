@@ -257,7 +257,7 @@ export interface ProcessedChartData {
   spec_area: VChartSpec
   spec_model_line: VChartSpec
   spec_rank_bar: VChartSpec
-  totalQuotaDisplay: string
+  totalTokensDisplay: string
   totalCountDisplay: string
 }
 

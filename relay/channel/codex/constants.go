@@ -12,7 +12,8 @@ var baseModelList = []string{
 	"gpt-5.4", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
 }
 
-var ModelList = append(withCompactModelSuffix(baseModelList), "gpt-image-2")
+var ModelList = append(withCompactModelSuffix(baseModelList),
+	"gpt-image-2", "gpt-realtime-1.5", "gpt-live-1-codex")
 
 const ChannelName = "codex"
 

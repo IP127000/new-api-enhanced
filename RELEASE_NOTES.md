@@ -17,6 +17,42 @@ Branch: `codex/upstream-20260704-enhanced`
 
 Purpose: refresh to the latest upstream code available on July 4, 2026, then reapply the private operational changes needed for Codex subscription channels, usage statistics, dashboard display, and deployment.
 
+### 2026-09-12 Dashboard Token Consumption Distribution
+
+The dashboard consumption-distribution chart now measures actual token usage
+instead of quota converted into a currency amount:
+
+- both the default and classic frontends aggregate the existing
+  `quota_data.token_used` value by time and model;
+- stacked-bar and area views, totals, ordering, and tooltips all use token
+  counts and no longer depend on the configured currency or quota conversion;
+- the chart title and icon make the token-based metric explicit;
+- billing, quota deduction, user-consumption charts, APIs, and the database
+  schema are unchanged.
+
+Relevant files:
+
+- `web/default/src/features/dashboard/lib/charts.ts`
+- `web/default/src/features/dashboard/lib/charts.test.ts`
+- `web/default/src/features/dashboard/components/models/consumption-distribution-chart.tsx`
+- `web/classic/src/hooks/dashboard/useDashboardCharts.jsx`
+- `web/classic/src/helpers/dashboard.jsx`
+- `web/classic/src/components/dashboard/ChartsPanel.jsx`
+
+Production deployment completed on September 12, 2026:
+
+- DNS was re-verified before deployment: `codex.kendeji.fun` now resolves to
+  the Alibaba Cloud host `47.251.253.215` (`aliyun-cloud-server`), not the old
+  Tencent host recorded in earlier handoff notes;
+- image/container `new-api:20260912-tokens` / `new-api-20260912-tokens` runs on
+  `127.0.0.1:3043`, and `/etc/caddy/Caddyfile` routes
+  `codex.kendeji.fun:443` to that port;
+- `new-api-20260726-rebuild` is retained but stopped as the immediate Codex
+  rollback; the separate Realtime service on port 3042 was not changed;
+- both frontend production builds, the dashboard token-distribution regression
+  test, relevant Go tests, local green health, repeated public health checks,
+  and the deployed frontend token-distribution labels passed.
+
 ### Codex Subscription Relay
 
 Codex subscription channels are detected by both API type and channel type:
@@ -54,6 +90,101 @@ Relevant files:
 - `relay/common/override.go`
 - `relay/responses_handler_test.go`
 - `relay/common/override_test.go`
+
+### 2026-08-30 Codex Realtime Voice Relay
+
+Branch: `codex/realtime-voice`
+
+Codex subscription channels now support the Realtime transports required by the
+Codex Harness while preserving the same paid subscription identity used by the
+Responses, image-generation, and web-search paths:
+
+- `POST /v1/realtime/calls` accepts the WebRTC multipart offer, reads the model
+  from `session.model`, forwards the original SDP/session payload, and preserves
+  the upstream SDP answer plus `Location` call id;
+- `/v1/realtime` and `/v1/live` WebSocket sideband connections use the existing
+  relay handler, with the model selected from the query or
+  `X-Codex-Realtime-Model` when the sideband URL has no model parameter;
+- the upstream Realtime data plane is `api.openai.com`, even when the configured
+  Codex channel base URL is the ChatGPT backend used by subscription Responses;
+- upstream `Authorization` and `chatgpt-account-id` always come from the selected
+  `APITypeCodex` + `ChannelTypeCodex` channel. The downstream New API key and
+  actor-authorization marker are never forwarded as upstream credentials;
+- the implementation does not change ordinary OpenAI-compatible channels or the
+  established Codex Responses original-body/header-passthrough behavior.
+
+Validation covered multipart model routing, credential isolation, SDP and
+`Location` preservation, Realtime WebSocket relay behavior, router exposure, and
+failed-channel retry semantics. A public Codex Harness V2 smoke test through
+`realtime.kendeji.fun` returned Chinese 24 kHz audio and transcript through
+`gpt-realtime-1.5`.
+
+Test deployment is separate from the Codex production domain:
+
+- host: `47.251.253.215` (`aliyun-cloud-server`);
+- image/container: `new-api:20260830-rtc2` /
+  `new-api-20260830-rtc2` on `127.0.0.1:3042`;
+- Caddy: `realtime.kendeji.fun:443 -> 127.0.0.1:3042`;
+- shared test database: `/opt/new-api/data-realtime`;
+- immediate rollback: `new-api-20260830-webrtc` on `127.0.0.1:3041`.
+
+Relevant files:
+
+- `controller/relay_realtime_call.go`
+- `middleware/distributor.go`
+- `relay/realtime_call.go`
+- `relay/channel/codex/adaptor.go`
+- `relay/constant/relay_mode.go`
+- `router/relay-router.go`
+- `scripts/codex_realtime_smoke.py`
+
+### 2026-07-25 Multi-Channel Retry for Claude and Codex SSE
+
+Claude (`POST /v1/messages`) and Codex SSE (`POST /v1/responses` and
+`/v1/responses/compact`) now participate in the standard failed-channel retry
+cycling. Previously the built-in `codex cli trace` and `claude cli trace`
+channel-affinity rules set `skip_retry_on_failure: true`, which bound each
+request to a single channel and returned the first upstream failure without
+trying other candidates.
+
+Behavior after this change:
+
+- the relay-loop retry decision (`controller/relay.go` `shouldRetry`) no longer
+  honors the channel-affinity skip-retry signal; a retryable upstream failure
+  falls through to the existing multi-channel cycling (retry the same channel up
+  to `RetryTimes`, then exclude it and select the next candidate);
+- channel affinity is unchanged as a *preference*: the distributor still selects
+  the affinity-bound channel first (preserving prompt-cache continuity), and only
+  on failure does the request move to another channel;
+- status-code gating is unchanged, so cross-channel retry stays bounded —
+  transient errors (429/5xx) cycle, deterministic client errors (400) do not;
+- **Codex WebSocket (`GET /v1/responses`) keeps its original single-channel
+  binding.** It runs in `RelayResponsesWebSocket`, never enters the retry loop,
+  and marks every error skip-retry, so it is unaffected by this change;
+- the retry cycling for downstream async tasks (`shouldRetryTaskRelay`) is not
+  in scope and still honors channel-affinity skip-retry;
+- no database format change: the `ChannelAffinitySetting` struct and the
+  `skip_retry_on_failure` field are retained (still consumed by the task path);
+  the change is code-only, so it takes effect regardless of any persisted
+  affinity configuration.
+
+Relevant files:
+
+- `controller/relay.go`
+- `controller/relay_retry_test.go`
+
+Production redeployment completed on July 26, 2026 for `api.kendeji.fun`:
+
+- the frontends and `linux/amd64` Go binary were rebuilt locally from the
+  working tree, with version `v1.0.0-rc.21-rebuild-20260726`;
+- image/container `new-api:20260726-rebuild` /
+  `new-api-20260726-rebuild` runs on `127.0.0.1:3038`, and Caddy targets port
+  3038 after local and public `/api/status` checks;
+- the rebuilt runtime image is 197 MB on the target host, matching the retained
+  July 22 image instead of the superseded 301 MB July 25 image;
+- `new-api:20260722-respws` / `new-api-20260722-respws` is retained as the sole
+  pre-July-25 rollback image/container; the superseded July 25 container/image
+  and uploaded image tarball were removed.
 
 ### 2026-07-22 Codex Responses WebSocket Relay
 

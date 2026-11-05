@@ -3,11 +3,14 @@ package codex
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	appconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -16,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 type Adaptor struct {
@@ -112,11 +116,20 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	if info != nil && info.RelayMode == relayconstant.RelayModeRealtime {
+		if isRealtimeCallRequest(info) {
+			return channel.DoApiRequest(a, c, info, requestBody)
+		}
+		return a.doRealtimeRequest(c, info)
+	}
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
 
 func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo) (usage any, err *types.NewAPIError) {
 	switch info.RelayMode {
+	case relayconstant.RelayModeRealtime:
+		realtimeErr, realtimeUsage := openai.OpenaiRealtimeHandler(c, info)
+		return realtimeUsage, realtimeErr
 	case relayconstant.RelayModeResponsesCompact:
 		return openai.OaiResponsesCompactionHandler(c, resp)
 	case relayconstant.RelayModeResponses:
@@ -157,6 +170,8 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		path = "/backend-api/codex/images/edits"
 	case relayconstant.RelayModeCodexWebSearch:
 		path = "/backend-api/codex/alpha/search"
+	case relayconstant.RelayModeRealtime:
+		return codexRealtimeRequestURL(info)
 	default:
 		return "", errors.New("codex channel: endpoint not supported")
 	}
@@ -192,6 +207,29 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	// trusted custom provider. It is not an upstream credential and must never
 	// be forwarded to ChatGPT.
 	req.Del("x-openai-actor-authorization")
+	if info.RelayMode == relayconstant.RelayModeRealtime {
+		headerNames := appconstant.CodexClientPassThroughHeaders()
+		headerNames = append(headerNames, "openai-alpha", "x-session-id")
+		for _, name := range headerNames {
+			if value := strings.TrimSpace(c.Request.Header.Get(name)); value != "" {
+				req.Set(name, value)
+			}
+		}
+		if req.Get("originator") == "" {
+			req.Set("originator", "codex_cli_rs")
+		}
+		if isRealtimeCallRequest(info) {
+			contentType := strings.TrimSpace(c.Request.Header.Get("Content-Type"))
+			if contentType == "" {
+				return errors.New("codex channel: realtime call Content-Type is required")
+			}
+			req.Set("Content-Type", contentType)
+			if accept := strings.TrimSpace(c.Request.Header.Get("Accept")); accept != "" {
+				req.Set("Accept", accept)
+			}
+		}
+		return nil
+	}
 
 	if (info.RelayMode == relayconstant.RelayModeResponses || info.RelayMode == relayconstant.RelayModeResponsesCompact) && req.Get("OpenAI-Beta") == "" {
 		req.Set("OpenAI-Beta", "responses=experimental")
@@ -211,4 +249,102 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	}
 
 	return nil
+}
+
+func codexRealtimeRequestURL(info *relaycommon.RelayInfo) (string, error) {
+	if info == nil {
+		return "", errors.New("codex channel: missing realtime relay info")
+	}
+	downstream, err := url.Parse(info.RequestURLPath)
+	if err != nil {
+		return "", fmt.Errorf("codex channel: invalid realtime request URL: %w", err)
+	}
+
+	// Codex subscription Responses, image generation, and web search use the
+	// ChatGPT backend. Realtime media is different: the Codex harness opens its
+	// websocket against the OpenAI Realtime data plane and authenticates it with
+	// the same subscription OAuth/account headers. Pointing this websocket at
+	// chatgpt.com is rejected by its browser-only Cloudflare challenge.
+	baseURL := strings.TrimRight(strings.TrimSpace(info.ChannelBaseUrl), "/")
+	if baseURL == "" {
+		baseURL = "https://api.openai.com"
+	} else if channelBase, parseErr := url.Parse(baseURL); parseErr == nil &&
+		strings.EqualFold(channelBase.Hostname(), "chatgpt.com") {
+		baseURL = "https://api.openai.com"
+	}
+
+	upstreamPath := "/v1/realtime"
+	isCall := downstream.Path == "/v1/realtime/calls"
+	if isCall {
+		upstreamPath = downstream.Path
+	}
+	if strings.HasPrefix(downstream.Path, "/v1/live") {
+		upstreamPath = "/v1/live"
+	}
+	fullURL := relaycommon.GetFullRequestURL(baseURL, upstreamPath, info.ChannelType)
+	upstream, err := url.Parse(fullURL)
+	if err != nil {
+		return "", fmt.Errorf("codex channel: invalid realtime upstream URL: %w", err)
+	}
+	if !isCall {
+		switch upstream.Scheme {
+		case "https":
+			upstream.Scheme = "wss"
+		case "http":
+			upstream.Scheme = "ws"
+		case "ws", "wss":
+		default:
+			return "", fmt.Errorf("codex channel: unsupported realtime URL scheme %q", upstream.Scheme)
+		}
+	} else if upstream.Scheme != "http" && upstream.Scheme != "https" {
+		return "", fmt.Errorf("codex channel: unsupported realtime call URL scheme %q", upstream.Scheme)
+	}
+
+	query := upstream.Query()
+	for _, name := range []string{"intent", "call_id", "architecture", "trace"} {
+		for _, value := range downstream.Query()[name] {
+			query.Add(name, value)
+		}
+	}
+	if !isCall {
+		model := strings.TrimSpace(info.UpstreamModelName)
+		if model == "" {
+			model = strings.TrimSpace(downstream.Query().Get("model"))
+		}
+		if model != "" {
+			query.Set("model", model)
+		}
+	}
+	upstream.RawQuery = query.Encode()
+	return upstream.String(), nil
+}
+
+func isRealtimeCallRequest(info *relaycommon.RelayInfo) bool {
+	if info == nil {
+		return false
+	}
+	downstream, err := url.Parse(info.RequestURLPath)
+	return err == nil && downstream.Path == "/v1/realtime/calls"
+}
+
+func (a *Adaptor) doRealtimeRequest(c *gin.Context, info *relaycommon.RelayInfo) (*websocket.Conn, error) {
+	requestURL, err := a.GetRequestURL(info)
+	if err != nil {
+		return nil, fmt.Errorf("get realtime request URL failed: %w", err)
+	}
+	header := http.Header{}
+	if err := a.SetupRequestHeader(c, &header, info); err != nil {
+		return nil, fmt.Errorf("setup realtime request header failed: %w", err)
+	}
+	connection, response, err := websocket.DefaultDialer.Dial(requestURL, header)
+	if err != nil {
+		if response != nil {
+			if response.Body != nil {
+				_ = response.Body.Close()
+			}
+			return nil, fmt.Errorf("dial Codex realtime upstream failed (status %d): %w", response.StatusCode, err)
+		}
+		return nil, fmt.Errorf("dial Codex realtime upstream failed: %w", err)
+	}
+	return connection, nil
 }

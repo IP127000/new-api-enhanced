@@ -28,6 +28,10 @@ type ModelRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
+type realtimeCallSession struct {
+	Model string `json:"model"`
+}
+
 // ChannelSelectionOptions contains the routing information that is normally
 // read from an HTTP request body by Distribute. Transports such as Responses
 // WebSocket receive the model in their first data frame and can call the same
@@ -256,6 +260,32 @@ func getModelFromRequest(c *gin.Context) (*ModelRequest, error) {
 	return &modelRequest, nil
 }
 
+func getModelFromRealtimeCall(c *gin.Context) (*ModelRequest, error) {
+	if !strings.Contains(c.Request.Header.Get("Content-Type"), gin.MIMEMultipartPOSTForm) {
+		return &ModelRequest{Model: c.Query("model")}, nil
+	}
+
+	form, err := common.ParseMultipartFormReusable(c)
+	if err != nil {
+		return nil, fmt.Errorf("invalid realtime call multipart body: %w", err)
+	}
+	defer form.RemoveAll()
+
+	sessionValues := form.Value["session"]
+	if len(sessionValues) == 0 || strings.TrimSpace(sessionValues[0]) == "" {
+		return &ModelRequest{Model: c.Query("model")}, nil
+	}
+
+	var session realtimeCallSession
+	if err := common.Unmarshal([]byte(sessionValues[0]), &session); err != nil {
+		return nil, fmt.Errorf("invalid realtime call session: %w", err)
+	}
+	if strings.TrimSpace(session.Model) == "" {
+		session.Model = c.Query("model")
+	}
+	return &ModelRequest{Model: session.Model}, nil
+}
+
 func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	storage, err := common.GetBodyStorage(c)
 	if err != nil {
@@ -411,9 +441,18 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 		}
 		modelRequest.Model = req.Model
 	}
-	if strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") {
-		//wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01
+	if c.Request.Method == http.MethodPost && c.Request.URL.Path == "/v1/realtime/calls" {
+		request, requestErr := getModelFromRealtimeCall(c)
+		if requestErr != nil {
+			return nil, false, requestErr
+		}
+		modelRequest.Model = request.Model
+	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/realtime") || strings.HasPrefix(c.Request.URL.Path, "/v1/live") {
+		// Realtime v1/v2 uses /v1/realtime; Codex Frameless Bidi v3 uses /v1/live.
 		modelRequest.Model = c.Query("model")
+		if modelRequest.Model == "" {
+			modelRequest.Model = strings.TrimSpace(c.GetHeader("X-Codex-Realtime-Model"))
+		}
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/moderations") {
 		if modelRequest.Model == "" {

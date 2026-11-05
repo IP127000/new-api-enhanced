@@ -42,6 +42,9 @@ const USER_COLORS = [
   '#ec4899', '#06b6d4', '#f97316', '#6366f1', '#14b8a6',
 ];
 
+const renderTokenCount = (value) =>
+  `${renderNumber(Number(value) || 0)} Token`;
+
 export const useDashboardCharts = (
   dataExportDefaultTime,
   setTrendData,
@@ -120,7 +123,7 @@ export const useDashboardCharts = (
       },
     ],
     xField: 'Time',
-    yField: 'Usage',
+    yField: 'Tokens',
     seriesField: 'Model',
     stack: true,
     legends: {
@@ -129,8 +132,8 @@ export const useDashboardCharts = (
     },
     title: {
       visible: true,
-      text: t('模型消耗分布'),
-      subtext: `${t('总计')}：${renderQuota(0, 2)}`,
+      text: t('模型 Token 消耗分布'),
+      subtext: `${t('总计')}：${renderTokenCount(0)}`,
     },
     bar: {
       state: {
@@ -145,7 +148,7 @@ export const useDashboardCharts = (
         content: [
           {
             key: (datum) => datum['Model'],
-            value: (datum) => renderQuota(datum['rawQuota'] || 0, 4),
+            value: (datum) => renderTokenCount(datum['rawTokens']),
           },
         ],
       },
@@ -153,7 +156,7 @@ export const useDashboardCharts = (
         content: [
           {
             key: (datum) => datum['Model'],
-            value: (datum) => datum['rawQuota'] || 0,
+            value: (datum) => datum['rawTokens'] || 0,
           },
         ],
         updateContent: (array) => {
@@ -170,11 +173,11 @@ export const useDashboardCharts = (
             if (array[i].datum && array[i].datum.TimeSum) {
               sum = array[i].datum.TimeSum;
             }
-            array[i].value = renderQuota(value, 4);
+            array[i].value = renderTokenCount(value);
           }
           array.unshift({
             key: t('总计'),
-            value: renderQuota(sum, 4),
+            value: renderTokenCount(sum),
           });
           return array;
         },
@@ -459,15 +462,13 @@ export const useDashboardCharts = (
           return {
             Time: time,
             Model: model,
-            rawQuota: aggregated?.quota || 0,
-            Usage: aggregated?.quota
-              ? getQuotaWithUnit(aggregated.quota, 4)
-              : 0,
+            rawTokens: aggregated?.tokens || 0,
+            Tokens: aggregated?.tokens || 0,
           };
         });
 
-        const timeSum = timeData.reduce((sum, item) => sum + item.rawQuota, 0);
-        timeData.sort((a, b) => b.rawQuota - a.rawQuota);
+        const timeSum = timeData.reduce((sum, item) => sum + item.rawTokens, 0);
+        timeData.sort((a, b) => b.rawTokens - a.rawTokens);
         timeData = timeData.map((item) => ({ ...item, TimeSum: timeSum }));
         newLineData.push(...timeData);
       });
@@ -485,7 +486,7 @@ export const useDashboardCharts = (
       updateChartSpec(
         setSpecLine,
         newLineData,
-        `${t('总计')}：${renderQuota(totalQuota, 2)}`,
+        `${t('总计')}：${renderTokenCount(totalTokens)}`,
         newModelColors,
         'barData',
       );

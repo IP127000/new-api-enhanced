@@ -89,6 +89,9 @@ func SetRelayRouter(router *gin.Engine) {
 		wsRouter.GET("/realtime", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIRealtime)
 		})
+		wsRouter.GET("/live", func(c *gin.Context) {
+			controller.Relay(c, types.RelayFormatOpenAIRealtime)
+		})
 	}
 	{
 		//http router
@@ -115,6 +118,7 @@ func SetRelayRouter(router *gin.Engine) {
 		httpRouter.POST("/responses/compact", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatOpenAIResponsesCompaction)
 		})
+		httpRouter.POST("/realtime/calls", controller.RelayRealtimeCall)
 		httpRouter.POST("/alpha/search", func(c *gin.Context) {
 			controller.Relay(c, types.RelayFormatCodexWebSearch)
 		})

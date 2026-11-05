@@ -19,4 +19,7 @@ func TestSetRelayRouterRegistersResponsesHTTPAndWebSocket(t *testing.T) {
 	}
 	require.True(t, routes[http.MethodGet+" /v1/responses"])
 	require.True(t, routes[http.MethodPost+" /v1/responses"])
+	require.True(t, routes[http.MethodGet+" /v1/realtime"])
+	require.True(t, routes[http.MethodGet+" /v1/live"])
+	require.True(t, routes[http.MethodPost+" /v1/realtime/calls"])
 }

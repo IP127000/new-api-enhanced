@@ -300,9 +300,14 @@ func shouldRetry(c *gin.Context, openaiErr *types.NewAPIError, retryTimes int) b
 	if common.GetContextKeyBool(c, constant.ContextKeyRelayRetryCommitted) {
 		return false
 	}
-	if service.ShouldSkipRetryAfterChannelAffinityFailure(c) {
-		return false
-	}
+	// Channel-affinity binding no longer suppresses retry on this relay-loop path.
+	// Codex WebSocket (GET /v1/responses) keeps its single-channel binding inside
+	// its own transport handler (RelayResponsesWebSocket marks every error
+	// skip-retry and never enters this loop). The retryable relay-loop transports
+	// — Claude (/v1/messages) and Codex SSE (POST /v1/responses[/compact]) — fall
+	// through to the normal multi-channel retry cycling below. Affinity still
+	// prefers the bound channel on the first attempt via the distributor; on
+	// failure the failed channel is excluded and other candidates are tried.
 	if types.IsChannelError(openaiErr) {
 		return true
 	}

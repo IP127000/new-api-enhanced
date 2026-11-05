@@ -265,7 +265,7 @@ export const processRawData = (
 
   data.forEach((item) => {
     result.uniqueModels.add(item.model_name);
-    result.totalTokens += item.token_used;
+    result.totalTokens += Number(item.token_used) || 0;
     result.totalQuota += item.quota;
     result.totalTimes += item.count;
 
@@ -348,12 +348,14 @@ export const aggregateDataByTimeAndModel = (data, dataExportDefaultTime) => {
         time: timeKey,
         model: modelKey,
         quota: 0,
+        tokens: 0,
         count: 0,
       });
     }
 
     const existing = aggregatedData.get(key);
     existing.quota += item.quota;
+    existing.tokens += Number(item.token_used) || 0;
     existing.count += item.count;
   });
 
