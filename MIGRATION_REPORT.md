@@ -5,7 +5,7 @@
 - New API：[v1.0.0-rc.48](https://github.com/QuantumNous/new-api/releases/tag/v1.0.0-rc.48)，提交 `706144769e5bed5a47b78721e3bb11da3cf4c0b9`，2026-11-04 发布；11 月 5 日开始迁移，11 月 6 日再次查询 GitHub，仍为最新发布版本。
 - Codex：[rust-v0.166.0](https://github.com/openai/codex/releases/tag/rust-v0.166.0)，11 月 6 日查询到的最新稳定版本参考。
 - 原工程提交 `d97386da3`；原工作区未提交改动已先保存为 `90f88ee31`。
-- 新分支：`1105`。原分支保留，未改变远端默认分支或部署生产。
+- 新分支：`1105`。原分支及远端默认分支保留。11 月 6 日已按后续指令部署根域名隔离测试实例，原 Codex 服务保持原版本。
 
 ## 官方实现优先
 
@@ -63,7 +63,7 @@ go test ./pkg/perf_metrics -count=1 -v
 
 ## 使用边界
 
-此次验证使用本地数据库和模拟上游，未使用生产订阅凭据进行真实搜索、生图或麦克风通话，也未部署。真实账户的模型权限、额度和媒体网络需要上线前验收。
+迁移阶段使用本地数据库和模拟上游。后续已按用户指令部署 `https://kendeji.fun`，通过真实订阅账号完成搜索、生图和官方 harness 0.167.0 WebSocket 音频测试；升级后的 Mac 客户端也已完成麦克风问答、图片展示及历史恢复；新版 V1/V3 WebRTC 被上游账号权限拒绝。根域名使用独立数据副本，原 Codex 服务不变。部署详情与回滚位置见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
 Codex 0.166 的 WebRTC sideband 默认直接访问 `api.openai.com`，只修改主 provider 的 base URL 不足以让该连接经过本网关；客户端需同时指向本网关。使用 Redis 时会话路由可跨进程共享；不使用 Redis 时需保持同一实例，重启会清空尚未结束的会话路由。
 

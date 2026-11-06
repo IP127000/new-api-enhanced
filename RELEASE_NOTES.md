@@ -1,6 +1,6 @@
 # Release Notes and AI Handoff
 
-This file documents the private fork changes and historical deployments. The active migration branch is `1105`. Production remains on its previously deployed image; this migration does not deploy or modify production data.
+This file documents the private fork changes and historical deployments. The active migration branch is `1105`. The existing Codex service remains on its previously deployed image. The `1105` build is deployed separately at `https://kendeji.fun` with an isolated data copy; see the deployment entry below.
 
 ## Branch Policy
 
@@ -11,6 +11,26 @@ The user explicitly requested `1105` on November 5, 2026:
 - `back-20260702`: existing July 2 rollback branch, retained.
 
 Do not recreate old debug/header/prompt-cache-key experiments. The historical sections below describe earlier deployments, not the behavior or deployment status of `1105`.
+
+## 2026-11-06 Root-domain test deployment (verified 2026-11-07)
+
+The user explicitly requested deployment over `ssh root@kendeji.fun` and testing with the Mac client at `/Users/seeker/Documents/APP-CAR-AI/ref/macos-realtime`.
+
+- Authoritative DNS: `kendeji.fun` A → `47.251.253.215`, host `iZrj9329y5rkhzeg5jbcnuZ`.
+- Build commit: `34e0d53ef`; image `new-api:20261106-voice`, container `new-api-20261106-voice`, binding `127.0.0.1:3044:3000`.
+- Frontend and Linux amd64 binary were built locally. The complete runtime image was packaged locally, uploaded and loaded on the server; nothing was compiled on the server.
+- Data: `/opt/new-api/data-1105:/data`, obtained by an online SQLite backup from the existing Codex database. Only the copy was upgraded and configured for testing. Its pre-upgrade backup is `/opt/new-api/data-1105/one-api.pre-rc48.db`.
+- A temporary initialization container ran official migrations twice, then was removed. The runtime uses entrypoint `/new-api`, no command arguments, `TZ=Asia/Shanghai`, `GOMEMLIMIT=1GiB`, `NODE_TYPE=slave`, and `--restart unless-stopped`.
+- Caddy routes the root domain to 3044 while preserving its `/videoweb` route. Configuration was validated before a short Caddy restart. Rollback configuration: `/etc/caddy/Caddyfile.before-1105-20261106`.
+- The Codex container on 3043 was never stopped or upgraded. Its immediate rollback was retained. The separate Realtime container was already stopped when inspected and was not modified or removed.
+- Public HTTPS `/api/status` returns success and `v1.0.0-rc.48-enhanced-20261105`; model listing and a complete streamed Responses request passed.
+- Real search and image tests through the root domain returned HTTP 200; one PNG was generated. Requests used the actual Codex client metadata expected by the configured channel. A generic Python User-Agent returned an upstream HTML 403; no backend default-identity substitution or security workaround was added.
+- Official Codex harness 0.167.0 V2 WebSocket smoke returned 110,400 bytes of 24 kHz mono audio and the Chinese transcript “实时语音中转测试成功”. The same account rejected the new V1/V3 AVAS WebRTC paths with `Voice session access denied`. The Mac client therefore uses the official supported V2 WebSocket transport; upstream harness source and authorization checks remain unchanged.
+
+- The upgraded Mac client completed a real microphone exchange, Chinese text-to-speech, a web query, image generation with inline display, mute/end, and history/image restoration after relaunch. Its final counters were 2,224 captured/sent microphone frames, 1,816,800 received audio bytes, 99 played buffers, zero discarded playback buffers and zero failures. AVAudioEngine voice processing stayed enabled with matched 48 kHz hardware rates and 24 kHz network PCM.
+- At final verification on November 7, HTTPS health checks remained successful. A new SSH connection to port 22 returned `Connection refused`; subsequent remote cleanup was not attempted. The uploaded image archive and pre-upgrade backup are retained. No inference is made about the cause of the SSH refusal.
+
+No passwords, API keys, subscription credentials, database copies, or QA audio are tracked in Git. The local test client uses a short-lived token in its private generated app bundle.
 
 ## 2026-11-05 Migration to rc.48 (`1105`)
 
