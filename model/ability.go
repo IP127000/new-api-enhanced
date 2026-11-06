@@ -2,11 +2,12 @@ package model
 
 import (
 	"errors"
-	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/samber/lo"
@@ -59,17 +60,14 @@ func GetAllEnableAbilities() []Ability {
 	return abilities
 }
 
-func getPriority(group string, model string, retry int, excludedChannelIDs ...int) (int, error) {
+func getPriority(group string, model string, retry int) (int, error) {
 
 	var priorities []int
-	query := DB.Model(&Ability{}).
+	err := DB.Model(&Ability{}).
 		Select("DISTINCT(priority)").
 		Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).
-		Order("priority DESC") // 按优先级降序排序
-	if len(excludedChannelIDs) > 0 {
-		query = query.Where("channel_id NOT IN ?", excludedChannelIDs)
-	}
-	err := query.Pluck("priority", &priorities).Error // Pluck用于将查询的结果直接扫描到一个切片中
+		Order("priority DESC").              // 按优先级降序排序
+		Pluck("priority", &priorities).Error // Pluck用于将查询的结果直接扫描到一个切片中
 
 	if err != nil {
 		// 处理错误
@@ -78,7 +76,7 @@ func getPriority(group string, model string, retry int, excludedChannelIDs ...in
 
 	if len(priorities) == 0 {
 		// 如果没有查询到优先级，则返回错误
-		return 0, errors.New("数据库一致性被破坏")
+		return 0, errors.New("database consistency is broken")
 	}
 
 	// 确定要使用的优先级
@@ -92,52 +90,63 @@ func getPriority(group string, model string, retry int, excludedChannelIDs ...in
 	return priorityToUse, nil
 }
 
-func getChannelQuery(group string, model string, retry int, excludedChannelIDs ...int) (*gorm.DB, error) {
+func getChannelQuery(group string, model string, retry int) (*gorm.DB, error) {
 	maxPrioritySubQuery := DB.Model(&Ability{}).Select("MAX(priority)").Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true)
-	if len(excludedChannelIDs) > 0 {
-		maxPrioritySubQuery = maxPrioritySubQuery.Where("channel_id NOT IN ?", excludedChannelIDs)
-	}
 	channelQuery := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = (?)", group, model, true, maxPrioritySubQuery)
-	if len(excludedChannelIDs) > 0 {
-		channelQuery = channelQuery.Where("channel_id NOT IN ?", excludedChannelIDs)
-	}
 	if retry != 0 {
-		priority, err := getPriority(group, model, retry, excludedChannelIDs...)
+		priority, err := getPriority(group, model, retry)
 		if err != nil {
 			return nil, err
 		} else {
 			channelQuery = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ? and priority = ?", group, model, true, priority)
-			if len(excludedChannelIDs) > 0 {
-				channelQuery = channelQuery.Where("channel_id NOT IN ?", excludedChannelIDs)
-			}
 		}
 	}
 
 	return channelQuery, nil
 }
 
-func GetChannel(group string, model string, retry int, requestPath string, excludedChannelIDs ...int) (*Channel, error) {
+func GetChannel(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+) (*Channel, error) {
 	var abilities []Ability
-
-	modelsToTry := []string{model}
-	if baseModel, ok := ratio_setting.WithoutCompactModelSuffix(model); ok {
-		modelsToTry = append(modelsToTry, baseModel)
+	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
+	if err != nil {
+		return nil, err
 	}
-	for index, candidateModel := range modelsToTry {
-		channelQuery, err := getChannelQuery(group, candidateModel, retry, excludedChannelIDs...)
+	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	// Like the memory cache, retry with the routing name (for example without
+	// @ modifiers) when no channel serves the exact name.
+	if normalized := ratio_setting.RoutingMatchModelName(model); len(abilities) == 0 && normalized != "" && normalized != model {
+		err = DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, normalized, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 		if err != nil {
-			if index+1 < len(modelsToTry) {
-				continue
+			return nil, err
+		}
+		abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	}
+	if len(abilities) > 0 {
+		priorities := make([]int64, 0)
+		seen := make(map[int64]bool)
+		for _, ability := range abilities {
+			priority := int64(0)
+			if ability.Priority != nil {
+				priority = *ability.Priority
 			}
-			return nil, err
+			if !seen[priority] {
+				seen[priority] = true
+				priorities = append(priorities, priority)
+			}
 		}
-		if err := channelQuery.Order("weight DESC").Find(&abilities).Error; err != nil {
-			return nil, err
+		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+		if retry >= len(priorities) {
+			retry = len(priorities) - 1
 		}
-		abilities = filterAbilitiesByRequestPathAndModel(abilities, requestPath, model)
-		if len(abilities) > 0 {
-			break
-		}
+		targetPriority := priorities[retry]
+		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
+			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
+		})
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {
@@ -159,16 +168,16 @@ func GetChannel(group string, model string, retry int, requestPath string, exclu
 	} else {
 		return nil, nil
 	}
-	err := DB.First(&channel, "id = ?", channel.Id).Error
+	err = DB.First(&channel, "id = ?", channel.Id).Error
 	return &channel, err
 }
 
-// filterAbilitiesByRequestPathAndModel restricts candidates by request path and
-// model for the DB selection path, including endpoint-specific channel types
-// and Advanced Custom route matching.
-func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath string, model string) []Ability {
-	if requestPath == "" || len(abilities) == 0 {
-		return abilities
+// filterAbilitiesByConstraints applies the same ChannelSatisfiesFilters
+// predicate used by the memory-cache path. A failed channel lookup fails
+// closed when a task-plugin identity is required and fails open otherwise.
+func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters []dto.ChannelFilter) []Ability {
+	if len(abilities) == 0 {
+		return nil
 	}
 
 	channelIds := make([]int, 0, len(abilities))
@@ -183,8 +192,7 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 
 	var channels []*Channel
 	if err := DB.Where("id IN ?", channelIds).Find(&channels).Error; err != nil {
-		// On error, fall back to unfiltered candidates to avoid blocking selection
-		if IsCodexWebSearchRequestPath(requestPath) {
+		if identityFilterRequiresKey(filters) {
 			return nil
 		}
 		return abilities
@@ -197,18 +205,21 @@ func filterAbilitiesByRequestPathAndModel(abilities []Ability, requestPath strin
 
 	filtered := make([]Ability, 0, len(abilities))
 	for _, ability := range abilities {
-		channel, ok := channelsByID[ability.ChannelId]
-		if !ok {
-			if !IsCodexWebSearchRequestPath(requestPath) {
-				filtered = append(filtered, ability)
-			}
-			continue
-		}
-		if ChannelSupportsRequestPath(channel, requestPath, model) {
+		channel := channelsByID[ability.ChannelId]
+		if ok, _ := ChannelSatisfiesFilters(channel, modelName, filters); ok {
 			filtered = append(filtered, ability)
 		}
 	}
 	return filtered
+}
+
+func identityFilterRequiresKey(filters []dto.ChannelFilter) bool {
+	for _, filter := range filters {
+		if filter.Kind == dto.FilterTaskPluginIdentity && filter.TaskPluginKey != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (channel *Channel) AddAbilities(tx *gorm.DB) error {
@@ -284,7 +295,7 @@ func (channel *Channel) UpdateAbilities(tx *gorm.DB) error {
 	}
 
 	// Then add new abilities
-	models_ := strings.Split(channel.Models, ",")
+	models_ := channel.GetModels()
 	groups_ := strings.Split(channel.Group, ",")
 	abilitySet := make(map[string]struct{})
 	abilities := make([]Ability, 0, len(models_))
@@ -355,7 +366,7 @@ var fixLock = sync.Mutex{}
 func FixAbility() (int, int, error) {
 	lock := fixLock.TryLock()
 	if !lock {
-		return 0, 0, errors.New("已经有一个修复任务在运行中，请稍后再试")
+		return 0, 0, common.NewMessage("A repair task is already running. Please try again later")
 	}
 	defer fixLock.Unlock()
 
@@ -363,13 +374,13 @@ func FixAbility() (int, int, error) {
 	if common.UsingMainDatabase(common.DatabaseTypeSQLite) {
 		err := DB.Exec("DELETE FROM abilities").Error
 		if err != nil {
-			common.SysLog(fmt.Sprintf("Delete abilities failed: %s", err.Error()))
+			common.SysLog(common.LogText("Delete abilities failed: %s", err.Error()))
 			return 0, 0, err
 		}
 	} else {
 		err := DB.Exec("TRUNCATE TABLE abilities").Error
 		if err != nil {
-			common.SysLog(fmt.Sprintf("Truncate abilities failed: %s", err.Error()))
+			common.SysLog(common.LogText("Truncate abilities failed: %s", err.Error()))
 			return 0, 0, err
 		}
 	}
@@ -389,7 +400,7 @@ func FixAbility() (int, int, error) {
 		// Delete all abilities of this channel
 		err = DB.Where("channel_id IN ?", ids).Delete(&Ability{}).Error
 		if err != nil {
-			common.SysLog(fmt.Sprintf("Delete abilities failed: %s", err.Error()))
+			common.SysLog(common.LogText("Delete abilities failed: %s", err.Error()))
 			failCount += len(chunk)
 			continue
 		}
@@ -397,7 +408,7 @@ func FixAbility() (int, int, error) {
 		for _, channel := range chunk {
 			err = channel.AddAbilities(nil)
 			if err != nil {
-				common.SysLog(fmt.Sprintf("Add abilities for channel %d failed: %s", channel.Id, err.Error()))
+				common.SysLog(common.LogText("Add abilities for channel %d failed: %s", channel.Id, err.Error()))
 				failCount++
 			} else {
 				successCount++

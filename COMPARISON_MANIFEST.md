@@ -1,5 +1,7 @@
 # Complete Comparison Manifest
 
+This is the historical July comparison. For the current `1105` / rc.48 migration, see [MIGRATION_REPORT.md](MIGRATION_REPORT.md).
+
 Generated from the common ancestor `722d0366b727b82fced878af902e48363626b2fb`, local tip `b9fe8082ab66f5add816bd0347115ec9b1df6d19`, and official release commit `bde9b2f44887d34ec54799ae191d50f97914359e`.
 
 ## Local-only commits (15)

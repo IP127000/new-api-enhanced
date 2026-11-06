@@ -28,7 +28,7 @@ func TestFetchCodexModelsUsesSubscriptionHeadersAndPreservesQuery(t *testing.T) 
 	}))
 	defer server.Close()
 
-	status, headers, body, err := FetchCodexModels(
+	status, headers, body, err := FetchCodexModelsRaw(
 		context.Background(),
 		server.Client(),
 		server.URL,

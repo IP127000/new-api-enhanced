@@ -1,19 +1,138 @@
 package helper
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/logger"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+// streamKeepAliveWriter 在业务写入前保活，写入开始时等待心跳退出。
+type streamKeepAliveWriter struct {
+	gin.ResponseWriter
+	mutex       sync.Mutex
+	cancel      context.CancelFunc
+	done        chan struct{}
+	pingContext *gin.Context
+}
+
+func (writer *streamKeepAliveWriter) stop() {
+	writer.cancel()
+	<-writer.done
+}
+
+func (writer *streamKeepAliveWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func (writer *streamKeepAliveWriter) Write(data []byte) (int, error) {
+	writer.stop()
+	return writer.ResponseWriter.Write(data)
+}
+
+func (writer *streamKeepAliveWriter) WriteString(data string) (int, error) {
+	writer.stop()
+	return writer.ResponseWriter.WriteString(data)
+}
+
+func (writer *streamKeepAliveWriter) WriteHeader(status int) {
+	writer.stop()
+	writer.ResponseWriter.WriteHeader(status)
+}
+
+func (writer *streamKeepAliveWriter) WriteHeaderNow() {
+	writer.stop()
+	writer.ResponseWriter.WriteHeaderNow()
+}
+
+func (writer *streamKeepAliveWriter) Flush() {
+	writer.stop()
+	writer.ResponseWriter.Flush()
+}
+
+func (writer *streamKeepAliveWriter) Status() int {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	return writer.ResponseWriter.Status()
+}
+
+func (writer *streamKeepAliveWriter) Size() int {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	return writer.ResponseWriter.Size()
+}
+
+func (writer *streamKeepAliveWriter) Written() bool {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	return writer.ResponseWriter.Written()
+}
+
+func (writer *streamKeepAliveWriter) ping() error {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	return PingData(writer.pingContext)
+}
+
+// StartStreamKeepAlive 按 interval 发送心跳，覆盖请求准备和重试；业务写入开始后交给流处理器。
+// 内层请求复用外层的保活，内层清理不会提前结束它。
+func StartStreamKeepAlive(c *gin.Context, interval time.Duration) func() {
+	if previous, ok := c.Writer.(*streamKeepAliveWriter); ok {
+		select {
+		case <-previous.done:
+			c.Writer = previous.ResponseWriter
+		default:
+			return func() {}
+		}
+	}
+	if requestContextDone(c) {
+		return func() {}
+	}
+	if interval <= 0 {
+		interval = DefaultPingInterval
+	}
+	SetEventStreamHeaders(c)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 120*time.Minute)
+	pingContext := c.Copy()
+	// 心跳使用原 writer，业务写入才会触发交接。
+	pingContext.Writer = c.Writer
+	writer := &streamKeepAliveWriter{ResponseWriter: c.Writer, cancel: cancel, done: make(chan struct{}), pingContext: pingContext}
+	c.Writer = writer
+	go writer.keepAlive(ctx, interval)
+	return writer.stop
+}
+
+func (writer *streamKeepAliveWriter) keepAlive(ctx context.Context, interval time.Duration) {
+	defer close(writer.done)
+	defer writer.cancel()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			logger.LogDebug(writer.pingContext, "SSE ping goroutine panic recovered: %v", recovered)
+		}
+	}()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if ctx.Err() != nil || writer.ping() != nil {
+				return
+			}
+		}
+	}
+}
 
 func FlushWriter(c *gin.Context) (err error) {
 	defer func() {
@@ -30,41 +149,27 @@ func FlushWriter(c *gin.Context) (err error) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	// Gin's responseWriter implements http.Flusher with a no-error Flush method.
-	// Calling only that method hides the underlying net/http FlushError result,
-	// so a terminal SSE frame can be recorded as delivered even when the
-	// connection failed while the server was flushing it. Unwrap transparent
-	// response-writer layers first and invoke the underlying error-aware flush
-	// exactly once. Calling Gin's Flush and then FlushError would double-flush;
-	// Codex may close immediately after the first successful terminal flush, so
-	// that second call could falsely turn a delivered frame into client_gone.
-	writer := http.ResponseWriter(c.Writer)
-	for {
-		if flusher, ok := writer.(interface{ FlushError() error }); ok {
-			if err := flusher.FlushError(); err != nil {
-				return fmt.Errorf("flush response failed: %w", err)
-			}
-			return nil
-		}
-
-		unwrapper, ok := writer.(interface {
-			Unwrap() http.ResponseWriter
-		})
-		if ok {
-			next := unwrapper.Unwrap()
-			if next == nil || next == writer {
-				return errors.New("streaming error: invalid response writer unwrap")
-			}
-			writer = next
-			continue
-		}
-
-		if flusher, ok := c.Writer.(http.Flusher); ok {
-			flusher.Flush()
-			return nil
-		}
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
 		return errors.New("streaming error: flusher not found")
 	}
+
+	flusher.Flush()
+	// Gin's http.Flusher wrapper discards the underlying FlushError result.
+	// Flush wrappers first so their buffers are preserved, then surface any
+	// stored write error from an error-aware writer underneath them.
+	var writer http.ResponseWriter = c.Writer
+	for {
+		if flusher, ok := writer.(interface{ FlushError() error }); ok {
+			return flusher.FlushError()
+		}
+		unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			break
+		}
+		writer = unwrapper.Unwrap()
+	}
+	return nil
 }
 
 func requestContextDone(c *gin.Context) bool {
@@ -85,6 +190,7 @@ func SetEventStreamHeaders(c *gin.Context) {
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("Transfer-Encoding", "chunked")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer = &streamResponseWriter{ResponseWriter: c.Writer}
 }
 
 func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
@@ -94,7 +200,7 @@ func ClaudeData(c *gin.Context, resp dto.ClaudeResponse) error {
 
 	jsonData, err := common.Marshal(resp)
 	if err != nil {
-		common.SysError("error marshalling stream response: " + err.Error())
+		common.SysError(common.LogText("error marshalling stream response: %s", err.Error()))
 	} else {
 		c.Render(-1, common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)})
 		c.Render(-1, common.CustomEvent{Data: "data: " + string(jsonData)})
@@ -114,98 +220,19 @@ func ClaudeChunkData(c *gin.Context, resp dto.ClaudeResponse, data string) {
 }
 
 func ResponseChunkData(c *gin.Context, resp dto.ResponsesStreamResponse, data string) error {
-	return ResponseChunkDataByType(c, resp.Type, data)
-}
-
-// ResponseChunkDataByType writes a Responses SSE frame without formatting or
-// rendering the (potentially very large) JSON payload into additional strings.
-// It also returns every downstream write error so callers can promptly close
-// the upstream response instead of continuing to buffer data for a gone client.
-func ResponseChunkDataByType(c *gin.Context, eventType string, data string) error {
-	if c == nil || c.Writer == nil {
-		return errors.New("context or writer is nil")
-	}
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	if c.Writer.Header().Get("Cache-Control") == "" {
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-	}
 
-	// Keep the wire format identical to the previous CustomEvent rendering:
-	// event: <type>\ndata: <verbatim JSON>\n\n.
-	prefix := "event: " + eventType + "\ndata: "
-	if err := writeStringAll(c.Writer, prefix); err != nil {
-		return fmt.Errorf("write response event prefix failed: %w", err)
+	event := common.CustomEvent{Data: fmt.Sprintf("event: %s\n", resp.Type)}
+	if err := event.Render(c.Writer); err != nil {
+		return err
 	}
-	if err := writeStringAll(c.Writer, data); err != nil {
-		return fmt.Errorf("write response event data failed: %w", err)
-	}
-	if err := writeStringAll(c.Writer, "\n\n"); err != nil {
-		return fmt.Errorf("write response event terminator failed: %w", err)
+	event.Data = fmt.Sprintf("data: %s", data)
+	if err := event.Render(c.Writer); err != nil {
+		return err
 	}
 	return FlushWriter(c)
-}
-
-// ResponseChunkDataBytesByType writes a Responses SSE frame directly from the
-// scanner-owned payload. The caller must keep data valid until this function
-// returns and must not mutate it concurrently.
-func ResponseChunkDataBytesByType(c *gin.Context, eventType string, data []byte) error {
-	if c == nil || c.Writer == nil {
-		return errors.New("context or writer is nil")
-	}
-	if requestContextDone(c) {
-		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
-	}
-	c.Writer.Header().Set("Content-Type", "text/event-stream")
-	if c.Writer.Header().Get("Cache-Control") == "" {
-		c.Writer.Header().Set("Cache-Control", "no-cache")
-	}
-
-	prefix := "event: " + eventType + "\ndata: "
-	if err := writeStringAll(c.Writer, prefix); err != nil {
-		return fmt.Errorf("write response event prefix failed: %w", err)
-	}
-	if err := writeBytesAll(c.Writer, data); err != nil {
-		return fmt.Errorf("write response event data failed: %w", err)
-	}
-	if err := writeStringAll(c.Writer, "\n\n"); err != nil {
-		return fmt.Errorf("write response event terminator failed: %w", err)
-	}
-	return FlushWriter(c)
-}
-
-func writeStringAll(writer io.Writer, data string) error {
-	for len(data) > 0 {
-		n, err := io.WriteString(writer, data)
-		if n > 0 {
-			data = data[n:]
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
-}
-
-func writeBytesAll(writer io.Writer, data []byte) error {
-	for len(data) > 0 {
-		n, err := writer.Write(data)
-		if n > 0 {
-			data = data[n:]
-		}
-		if err != nil {
-			return err
-		}
-		if n == 0 {
-			return io.ErrShortWrite
-		}
-	}
-	return nil
 }
 
 func StringData(c *gin.Context, str string) error {
@@ -230,13 +257,13 @@ func PingData(c *gin.Context) error {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
 
-	if err := writeBytesAll(c.Writer, []byte(": PING\n\n")); err != nil {
+	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}
 	return FlushWriter(c)
 }
 
-func ObjectData(c *gin.Context, object interface{}) error {
+func ObjectData(c *gin.Context, object any) error {
 	if object == nil {
 		return errors.New("object is nil")
 	}
@@ -253,20 +280,20 @@ func Done(c *gin.Context) {
 
 func WssString(c *gin.Context, ws *websocket.Conn, str string) error {
 	if ws == nil {
-		logger.LogError(c, "websocket connection is nil")
+		logger.LogError(c, common.LogText("websocket connection is nil"))
 		return errors.New("websocket connection is nil")
 	}
 	//common.LogInfo(c, fmt.Sprintf("sending message: %s", str))
 	return ws.WriteMessage(1, []byte(str))
 }
 
-func WssObject(c *gin.Context, ws *websocket.Conn, object interface{}) error {
+func WssObject(c *gin.Context, ws *websocket.Conn, object any) error {
 	jsonData, err := common.Marshal(object)
 	if err != nil {
 		return fmt.Errorf("error marshalling object: %w", err)
 	}
 	if ws == nil {
-		logger.LogError(c, "websocket connection is nil")
+		logger.LogError(c, common.LogText("websocket connection is nil"))
 		return errors.New("websocket connection is nil")
 	}
 	//common.LogInfo(c, fmt.Sprintf("sending message: %s", jsonData))

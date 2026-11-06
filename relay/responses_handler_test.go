@@ -12,6 +12,7 @@ import (
 	appconstant "github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
@@ -173,7 +174,7 @@ func TestCommitCodexResponsesStreamReleasesBodiesWithoutCancelingClient(t *testi
 	outbound, err := common.CreateBodyStorage([]byte(`{"model":"gpt-5.6-sol","input":"hello","instructions":"","store":false}`))
 	require.NoError(t, err)
 
-	commitCodexResponsesStream(c, outbound, true)
+	commitCodexResponsesStream(c, outbound)
 	require.True(t, common.GetContextKeyBool(c, appconstant.ContextKeyRelayRetryCommitted))
 	require.Equal(t, http.NoBody, c.Request.Body)
 	_, indexed := common.GetContextKeyType[[]common.JSONFieldSpan](c, appconstant.ContextKeyJSONBodyTopLevelFields)
@@ -262,4 +263,23 @@ func TestSanitizeCodexOriginalResponsesBodyNoOpAllocationBound(t *testing.T) {
 	t.Logf("no-op sanitizer allocated %d bytes/op for a %d-byte request", result.AllocedBytesPerOp(), len(body))
 	require.Less(t, result.AllocedBytesPerOp(), int64(64<<10),
 		"no-op sanitization must not allocate in proportion to request size")
+}
+
+func TestPrepareCodexResponsesHonorsOfficialModelModifiers(t *testing.T) {
+	const body = `{"model":"gpt-5.4-high","input":"keep this input","tools":[{"type":"web_search"}],"stream":true}`
+	c, _ := newCodexBodyTestContext(t, []byte(body))
+	common.SetContextKey(c, appconstant.ContextKeyChannelType, appconstant.ChannelTypeCodex)
+	common.SetContextKey(c, appconstant.ContextKeyCodexResponsesMinimalRequest, true)
+	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, "gpt-5.4-high")
+	request := &dto.OpenAIResponsesRequest{Model: "gpt-5.4-high", Stream: common.GetPointer(true)}
+	info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeResponses, OriginModelName: request.Model, Request: request}
+	_, outbound, closer, apiErr := PrepareResponsesRequest(c, info, request)
+	require.Nil(t, apiErr)
+	defer closer.Close()
+	raw, err := io.ReadAll(outbound)
+	require.NoError(t, err)
+	require.Equal(t, "gpt-5.4", gjson.GetBytes(raw, "model").String())
+	require.Equal(t, "high", gjson.GetBytes(raw, "reasoning.effort").String())
+	require.Equal(t, "keep this input", gjson.GetBytes(raw, "input").String())
+	require.Equal(t, "web_search", gjson.GetBytes(raw, "tools.0.type").String())
 }

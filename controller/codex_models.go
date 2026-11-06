@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/relay/channel/codex"
 	"github.com/QuantumNous/new-api/service"
@@ -99,11 +99,9 @@ func ListCodexModels(c *gin.Context) {
 }
 
 func selectCodexModelsChannel(c *gin.Context) (*model.Channel, error) {
-	if channelIDValue, ok := common.GetContextKey(c, constant.ContextKeyTokenSpecificChannelId); ok {
-		channelID, err := strconv.Atoi(fmt.Sprint(channelIDValue))
-		if err != nil {
-			return nil, fmt.Errorf("codex models: invalid token channel")
-		}
+	service.GetChannelConstraints(c).AddFilter(dto.ChannelFilter{Kind: dto.FilterChannelType, ChannelTypes: []int{constant.ChannelTypeCodex}})
+	if pin, found, _ := service.GetChannelConstraints(c).ResolvedPin(); found {
+		channelID := pin.ChannelId
 		channel, err := model.GetChannelById(channelID, true)
 		if err != nil {
 			return nil, err
@@ -119,7 +117,7 @@ func selectCodexModelsChannel(c *gin.Context) (*model.Channel, error) {
 		group = common.GetContextKeyString(c, constant.ContextKeyTokenGroup)
 	}
 	for _, modelName := range codexModelsChannelCandidates {
-		channel, err := model.GetRandomSatisfiedChannel(group, modelName, 0, "/v1/models")
+		channel, _, err := service.CacheGetRandomSatisfiedChannel(&service.RetryParam{Ctx: c, TokenGroup: group, ModelName: modelName, RequestPath: "/v1/models", Retry: common.GetPointer(0)})
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +135,7 @@ func fetchCodexModels(c *gin.Context, channel *model.Channel, accessToken string
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
-	return service.FetchCodexModels(
+	return service.FetchCodexModelsRaw(
 		ctx,
 		client,
 		channel.GetBaseURL(),

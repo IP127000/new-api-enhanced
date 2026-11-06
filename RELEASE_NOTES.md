@@ -1,15 +1,30 @@
 # Release Notes and AI Handoff
 
-This file documents the local fork changes that should be preserved when another AI or maintainer continues the work. The current active branch is `codex/upstream-20260704-enhanced`; the rollback branch is `back-20260702`.
+This file documents the private fork changes and historical deployments. The active migration branch is `1105`. Production remains on its previously deployed image; this migration does not deploy or modify production data.
 
 ## Branch Policy
 
-Only keep these two remote branches:
+The user explicitly requested `1105` on November 5, 2026:
 
-- `codex/upstream-20260704-enhanced`: current feature branch and default working branch.
-- `back-20260702`: July 2, 2026 rollback branch. It points to the last known smaller/stable backup snapshot before the July 4 upstream refresh.
+- `1105`: New API rc.48 migration, based on the existing enhanced checkout.
+- `codex/upstream-20260704-enhanced`: existing default/feature branch, retained.
+- `back-20260702`: existing July 2 rollback branch, retained.
 
-Do not keep temporary investigation branches such as header-debug, passthrough-test, or old request-body experiments after their changes have been folded into the current branch.
+Do not recreate old debug/header/prompt-cache-key experiments. The historical sections below describe earlier deployments, not the behavior or deployment status of `1105`.
+
+## 2026-11-05 Migration to rc.48 (`1105`)
+
+Baseline: official `v1.0.0-rc.48` (`706144769e5bed5a47b78721e3bb11da3cf4c0b9`). Codex protocol reference: official `rust-v0.166.0`. See [MIGRATION_REPORT.md](MIGRATION_REPORT.md) for the retained changes and verification.
+
+The user's rule is to use the official implementation wherever it now provides the feature. Consequently this branch uses the official Responses HTTP/WebSocket lifecycle, SSE handling, retry/routing rules, AlphaSearch web search, image response and usage processing, error logs, security audit separation, and weighted performance health summaries. Failure samples are retained by official performance metrics. The former success-only health metrics/error-log suppression and custom Responses WebSocket implementation are superseded.
+
+The frontend is the official unified `web/` application; Classic and `web/default/` have been removed upstream. Local token-consumption charts, token/cache statistics, custom date ranges, API restriction settings, memory diagnostics, and site icons have been ported into this structure. All upstream translation keys are retained.
+
+Codex subscription original-body optimization remains gated by **both** `APITypeCodex` and `ChannelTypeCodex`. Normal Responses retain unknown input/tool fields, including web search and image-generation tools, with bounded body parsing and early memory release. Explicit model modifiers or configured system prompts use official conversion. Safe client metadata headers are forwarded, while upstream OAuth and account identity still come from the configured channel. No prompt_cache_key mutation or temporary diagnostic logging is introduced.
+
+Codex Images support generations, JSON edits and SSE through official OpenAI response handlers. Realtime adds `/v1/realtime`, GET/POST `/v1/live`, POST `/v1/realtime/calls`, and GET `/v1/live/:call_id`. WebRTC SDP/session bodies and Location are preserved. Sideband calls are bound to the creating user/token/channel, cached with a two-hour TTL (Redis when configured; local LRU otherwise), and cannot switch subscription accounts. WebSocket transport uses the official proxy/TLS/context-aware dialer. These compatibility paths require a channel whose account can access the requested upstream model.
+
+The official Codex 0.166 WebRTC sideband client defaults to `api.openai.com`, independently of the main provider base URL. A client using this gateway for WebRTC must also direct its sideband connection here; the gateway cannot redirect a connection sent directly to OpenAI. Without Redis, sideband connections must reach the same process that created the call. Upstream voice quota/entitlement and real microphone playback remain live-environment acceptance checks.
 
 ## 2026-07-04 Current Feature Branch
 

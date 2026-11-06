@@ -26,19 +26,6 @@ func countPersistedLogs(t *testing.T) int64 {
 	return count
 }
 
-func TestOperationalAndErrorLogsAreNotPersisted(t *testing.T) {
-	resetLogRecordTestTables(t)
-	c, _ := gin.CreateTestContext(httptest.NewRecorder())
-
-	RecordLog(1, LogTypeSystem, "system event")
-	RecordLogWithAdminInfo(1, LogTypeManage, "manage event", map[string]interface{}{"operator": "admin"})
-	RecordLoginLog(1, "alice", "login", "127.0.0.1", "login", nil, nil)
-	RecordOperationAuditLog(1, "setting update", "127.0.0.1", "setting.update", nil, nil, nil)
-	RecordErrorLog(c, 1, 2, "gpt-test", "codex", "upstream unavailable", 3, 1, true, "svip", nil)
-
-	assert.Equal(t, int64(0), countPersistedLogs(t))
-}
-
 func TestConsumeLogsStillPersistAndDriveStats(t *testing.T) {
 	resetLogRecordTestTables(t)
 	require.NoError(t, DB.Create(&User{Id: 1, Username: "alice", Status: common.UserStatusEnabled}).Error)
@@ -55,12 +42,12 @@ func TestConsumeLogsStillPersistAndDriveStats(t *testing.T) {
 		ModelName:        "gpt-test",
 		TokenName:        "codex",
 		Quota:            123,
-		Content:          "success",
+		Content:          []*common.Message{common.NewMessage("success")},
 		TokenId:          3,
 		UseTimeSeconds:   1,
 		IsStream:         true,
 		Group:            "svip",
-		Other:            map[string]interface{}{"cache_tokens": 40},
+		Other:            &LogOther{public: map[string]any{"cache_tokens": 40}},
 	})
 
 	assert.Equal(t, int64(1), countPersistedLogs(t))

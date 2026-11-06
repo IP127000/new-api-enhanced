@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/QuantumNous/new-api/common"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
@@ -22,6 +23,11 @@ func GetPerfMetricsSummary(c *gin.Context) {
 		}
 	}
 
+	recentModels := c.QueryArray("recent_model")
+	if len(recentModels) > perfmetrics.MaxRecentModels {
+		common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid parameters"))
+		return
+	}
 	activeGroups := append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto")
 	var result perfmetrics.SummaryAllResult
 	var err error
@@ -34,11 +40,11 @@ func GetPerfMetricsSummary(c *gin.Context) {
 		if !hasEnd {
 			endTs = 0
 		}
-		result, err = perfmetrics.QuerySummaryRange(startTs, endTs, activeGroups)
+		result, err = perfmetrics.QuerySummaryRange(startTs, endTs, activeGroups, recentModels...)
 	} else if allHistory {
-		result, err = perfmetrics.QuerySummaryRange(0, 0, activeGroups)
+		result, err = perfmetrics.QuerySummaryRange(0, 0, activeGroups, recentModels...)
 	} else {
-		result, err = perfmetrics.QuerySummaryAll(hours, activeGroups)
+		result, err = perfmetrics.QuerySummaryAll(hours, activeGroups, recentModels...)
 	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -84,9 +90,10 @@ func GetPerfMetrics(c *gin.Context) {
 	}
 
 	result, err := perfmetrics.Query(perfmetrics.QueryParams{
-		Model: modelName,
-		Group: c.Query("group"),
-		Hours: hours,
+		Model:         modelName,
+		Group:         c.Query("group"),
+		Hours:         hours,
+		AllowedGroups: append(lo.Keys(ratio_setting.GetGroupRatioCopy()), "auto"),
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -96,18 +103,8 @@ func GetPerfMetrics(c *gin.Context) {
 		return
 	}
 
-	result.Groups = filterActiveGroups(result.Groups)
-
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"data":    result,
-	})
-}
-
-func filterActiveGroups(groups []perfmetrics.GroupResult) []perfmetrics.GroupResult {
-	activeRatios := ratio_setting.GetGroupRatioCopy()
-	return lo.Filter(groups, func(g perfmetrics.GroupResult, _ int) bool {
-		_, ok := activeRatios[g.Group]
-		return ok || g.Group == "auto"
 	})
 }

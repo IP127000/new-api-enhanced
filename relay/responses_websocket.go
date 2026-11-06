@@ -1,1233 +1,961 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
-	"github.com/QuantumNous/new-api/logger"
+	appdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
-	"github.com/QuantumNous/new-api/relay/channel"
-	"github.com/QuantumNous/new-api/relay/channel/codex"
-	"github.com/QuantumNous/new-api/relay/channel/openai"
+	appmodel "github.com/QuantumNous/new-api/model"
+	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
+	"github.com/QuantumNous/new-api/pkg/wsmanager"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/operation_setting"
-	"github.com/QuantumNous/new-api/types"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
 
-const (
-	responsesWebSocketBetaHeader    = "responses_websockets=2026-02-06"
-	responsesWebSocketDialTimeout   = 15 * time.Second
-	responsesWebSocketWriteTimeout  = 30 * time.Second
-	responsesWebSocketTerminalGrace = 2 * time.Second
-)
+const responsesWSEventTypeResponseCreate = "response.create"
+const responsesWSWriteTimeout = 30 * time.Second
 
-// ResponsesWebSocketFrame owns one replayable WebSocket text message. Call
-// Close when the frame has either been forwarded or rejected.
-type ResponsesWebSocketFrame struct {
-	Storage  common.BodyStorage
-	Type     string
-	Model    string
-	Generate bool
+// ResponsesWSRequestRunner executes the existing authentication and rate-limit
+// middleware around one complete request, without a second HTTP connection.
+type ResponsesWSRequestRunner func(*http.Request, string, func(*gin.Context) *types.NewAPIError) *types.NewAPIError
+
+type responsesWSCreateEvent struct {
+	Type     string            `json:"type"`
+	EventID  string            `json:"event_id,omitempty"`
+	StreamID common.RawMessage `json:"stream_id,omitempty"`
+	Generate common.RawMessage `json:"generate,omitempty"`
+	Request  common.RawMessage `json:"response,omitempty"`
 }
 
-func (f *ResponsesWebSocketFrame) Close() error {
-	if f == nil || f.Storage == nil {
-		return nil
-	}
-	err := f.Storage.Close()
-	f.Storage = nil
-	return err
+type responsesWSCreateRequest struct {
+	Request  dto.OpenAIResponsesRequest
+	Body     []byte
+	Generate common.RawMessage
+	StreamID string
 }
 
-// ResponsesWebSocketError is serializable in the wrapped error shape used by
-// the official Responses WebSocket client.
-type ResponsesWebSocketError struct {
-	StatusCode int
-	CloseCode  int
-	Type       string
-	Code       string
-	Message    string
-	Headers    map[string]string
-	Err        error
+type responsesWSErrorEvent struct {
+	Type       string             `json:"type"`
+	Status     int                `json:"status"`
+	EventID    string             `json:"event_id,omitempty"`
+	StreamID   string             `json:"stream_id,omitempty"`
+	ResponseID string             `json:"response_id,omitempty"`
+	Error      *types.OpenAIError `json:"error"`
 }
 
-func (e *ResponsesWebSocketError) Error() string {
-	if e == nil {
-		return ""
-	}
-	if e.Err != nil {
-		return e.Err.Error()
-	}
-	return e.Message
+type responsesWSMessage struct {
+	kind int
+	body []byte
+	err  error
 }
 
-type responsesWebSocketErrorEvent struct {
-	Type    string                     `json:"type"`
-	Status  int                        `json:"status"`
-	Error   responsesWebSocketAPIError `json:"error"`
-	Headers map[string]string          `json:"headers,omitempty"`
+// responsesWSControl is a client control event (response.cancel) whose
+// envelope the read loop already parsed.
+type responsesWSControl struct {
+	body              []byte
+	eventID, streamID string
 }
 
-type responsesWebSocketAPIError struct {
-	Type    string `json:"type"`
-	Code    string `json:"code,omitempty"`
-	Message string `json:"message"`
+// Only the request worker reads or changes billing state. Socket readers pass
+// bounded messages to it; cancellation never performs an independent refund.
+type responsesWSCallState struct {
+	inbox    chan responsesWSMessage
+	controls chan responsesWSControl
+	done     chan struct{}
+	terminal *responsesWSMessage
+	// A nonzero closeCode ends the connection after this request.
+	closeCode   int
+	closeReason string
 }
 
-func newResponsesWebSocketError(statusCode int, closeCode int, errorType string, code string, err error) *ResponsesWebSocketError {
-	message := "responses websocket error"
-	if err != nil && strings.TrimSpace(err.Error()) != "" {
-		message = err.Error()
-	}
-	if errorType == "" {
-		errorType = "new_api_error"
-	}
-	return &ResponsesWebSocketError{
-		StatusCode: statusCode,
-		CloseCode:  closeCode,
-		Type:       errorType,
-		Code:       code,
-		Message:    message,
-		Err:        err,
-	}
+type responsesWSSession struct {
+	ctx            context.Context
+	cancel         context.CancelFunc
+	client         *websocket.Conn
+	runner         ResponsesWSRequestRunner
+	request        *http.Request
+	requestID      string
+	nextEventIndex int
+	workers        sync.WaitGroup
+	closeOnce      sync.Once
+
+	clientWriteMu sync.Mutex
+	targetWriteMu sync.Mutex
+	connectionMu  sync.Mutex
+	target        *websocket.Conn
+	unregister    func()
+	stateMu       sync.Mutex
+	current       *responsesWSCallState
+
+	// clientWriteBudget is guarded by clientWriteMu.
+	clientWriteBudget helper.StreamWriteBudget
+
+	// These fields belong to the serial request worker and describe the actual
+	// established connection. Per-request token/user data is never stored here.
+	lastResponseID  string
+	lockedModel     string
+	lockedChannelID int
+	lockedGroup     string
+	lockedKey       string
+	lockedKeyIndex  int
+	lockedContext   map[appconstant.ContextKey]any
+	lockedRoute     dto.AdvancedCustomRoute
 }
 
-// WriteResponsesWebSocketError sends an application error followed by a close
-// frame. It is safe to call after the downstream HTTP connection was upgraded.
-func WriteResponsesWebSocketError(conn *websocket.Conn, wsErr *ResponsesWebSocketError) {
-	if conn == nil || wsErr == nil {
-		return
+func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	s := &responsesWSSession{ctx: ctx, cancel: cancel, client: client, runner: runner,
+		request: c.Request.Clone(ctx), requestID: c.GetString(common.RequestIdKey)}
+	if s.requestID == "" {
+		s.requestID = common.NewRequestId()
 	}
-	statusCode := wsErr.StatusCode
-	if statusCode < 100 || statusCode > 599 {
-		statusCode = http.StatusInternalServerError
-	}
-	errorType := wsErr.Type
-	if errorType == "" {
-		errorType = "new_api_error"
-	}
-	message := wsErr.Message
-	if message == "" {
-		message = wsErr.Error()
-	}
-	payload, err := common.Marshal(responsesWebSocketErrorEvent{
-		Type:   "error",
-		Status: statusCode,
-		Error: responsesWebSocketAPIError{
-			Type:    errorType,
-			Code:    wsErr.Code,
-			Message: message,
-		},
-		Headers: wsErr.Headers,
-	})
-	if err == nil {
-		_ = conn.SetWriteDeadline(time.Now().Add(responsesWebSocketWriteTimeout))
-		_ = conn.WriteMessage(websocket.TextMessage, payload)
-		_ = conn.SetWriteDeadline(time.Time{})
-	}
-	closeCode := wsErr.CloseCode
-	if closeCode == 0 {
-		closeCode = websocket.ClosePolicyViolation
-	}
-	writeResponsesWebSocketClose(conn, closeCode, truncateWebSocketCloseReason(message))
-}
-
-func truncateWebSocketCloseReason(reason string) string {
-	const maxCloseReasonBytes = 123
-	if len(reason) <= maxCloseReasonBytes {
-		return reason
-	}
-	return reason[:maxCloseReasonBytes]
-}
-
-func writeResponsesWebSocketClose(conn *websocket.Conn, code int, reason string) {
-	if conn == nil {
-		return
-	}
-	_ = conn.WriteControl(
-		websocket.CloseMessage,
-		websocket.FormatCloseMessage(code, reason),
-		time.Now().Add(responsesWebSocketWriteTimeout),
-	)
-}
-
-func responsesWebSocketMaxFrameBytes() int64 {
 	maxMB := appconstant.MaxRequestBodyMB
 	if maxMB <= 0 {
 		maxMB = 128
 	}
-	return int64(maxMB) << 20
-}
-
-// ReadResponsesWebSocketFrame reads and validates one response.create text
-// frame without materializing large input or tool definitions.
-func ReadResponsesWebSocketFrame(conn *websocket.Conn, maxBytes int64) (*ResponsesWebSocketFrame, *ResponsesWebSocketError) {
-	frame, wsErr := readResponsesWebSocketTextFrame(conn, maxBytes)
-	if wsErr != nil {
-		return nil, wsErr
-	}
-	storage := frame.Storage
-
-	fields, err := common.IndexTopLevelJSONObject(storage, storage.Size())
-	if err != nil {
-		_ = frame.Close()
-		return nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.CloseInvalidFramePayloadData,
-			"invalid_request_error",
-			string(types.ErrorCodeInvalidRequest),
-			fmt.Errorf("invalid response.create JSON: %w", err),
-		)
-	}
-	fieldsByName := make(map[string]common.JSONFieldSpan, len(fields))
-	for _, field := range fields {
-		fieldsByName[field.Name] = field
-	}
-
-	frame.Type, err = readResponsesWebSocketStringField(storage, fieldsByName, "type", true)
-	if err == nil {
-		frame.Model, err = readResponsesWebSocketStringField(storage, fieldsByName, "model", true)
-	}
-	if err == nil {
-		if generateField, exists := fieldsByName["generate"]; exists {
-			raw, readErr := common.ReadJSONSpan(storage, generateField.Value, 64)
-			if readErr != nil {
-				err = fmt.Errorf("generate is invalid: %w", readErr)
-			} else if string(raw) != "null" {
-				if unmarshalErr := common.Unmarshal(raw, &frame.Generate); unmarshalErr != nil {
-					err = fmt.Errorf("generate must be a boolean: %w", unmarshalErr)
-				}
-			}
-		}
-	}
-	if err == nil && frame.Type != "response.create" {
-		err = fmt.Errorf("unsupported websocket message type %q", frame.Type)
-	}
-	if err != nil {
-		_ = frame.Close()
-		return nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeInvalidRequest),
-			err,
-		)
-	}
-	return frame, nil
-}
-
-func readResponsesWebSocketTextFrame(conn *websocket.Conn, maxBytes int64) (*ResponsesWebSocketFrame, *ResponsesWebSocketError) {
-	if conn == nil {
-		return nil, newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeInvalidRequest),
-			errors.New("websocket connection is nil"),
-		)
-	}
-	if maxBytes <= 0 {
-		maxBytes = responsesWebSocketMaxFrameBytes()
-	}
-	conn.SetReadLimit(maxBytes)
-	messageType, reader, err := conn.NextReader()
-	if err != nil {
-		closeCode := websocket.CloseGoingAway
-		statusCode := http.StatusBadRequest
-		errorCode := types.ErrorCodeInvalidRequest
-		if errors.Is(err, websocket.ErrReadLimit) || websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
-			closeCode = websocket.CloseMessageTooBig
-			statusCode = http.StatusRequestEntityTooLarge
-			errorCode = types.ErrorCodeReadRequestBodyFailed
-		}
-		return nil, newResponsesWebSocketError(
-			statusCode,
-			closeCode,
-			"invalid_request_error",
-			string(errorCode),
-			err,
-		)
-	}
-	if messageType != websocket.TextMessage {
-		return nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.CloseUnsupportedData,
-			"invalid_request_error",
-			string(types.ErrorCodeInvalidRequest),
-			fmt.Errorf("responses websocket requires text JSON frames"),
-		)
-	}
-
-	storage, err := common.CreateBodyStorageFromReader(reader, -1, maxBytes)
-	if err != nil {
-		statusCode := http.StatusBadRequest
-		closeCode := websocket.CloseInvalidFramePayloadData
-		if common.IsRequestBodyTooLargeError(err) || errors.Is(err, websocket.ErrReadLimit) {
-			statusCode = http.StatusRequestEntityTooLarge
-			closeCode = websocket.CloseMessageTooBig
-		}
-		return nil, newResponsesWebSocketError(
-			statusCode,
-			closeCode,
-			"invalid_request_error",
-			string(types.ErrorCodeReadRequestBodyFailed),
-			err,
-		)
-	}
-	return &ResponsesWebSocketFrame{Storage: storage, Generate: true}, nil
-}
-
-func readResponsesWebSocketStringField(
-	storage common.BodyStorage,
-	fields map[string]common.JSONFieldSpan,
-	name string,
-	required bool,
-) (string, error) {
-	field, exists := fields[name]
-	if !exists {
-		if required {
-			return "", fmt.Errorf("%s is required", name)
-		}
-		return "", nil
-	}
-	raw, err := common.ReadJSONSpan(storage, field.Value, 64<<10)
-	if err != nil {
-		return "", fmt.Errorf("%s is invalid: %w", name, err)
-	}
-	if string(raw) == "null" {
-		if required {
-			return "", fmt.Errorf("%s is required", name)
-		}
-		return "", nil
-	}
-	var value string
-	if err := common.Unmarshal(raw, &value); err != nil {
-		return "", fmt.Errorf("%s must be a string: %w", name, err)
-	}
-	if required && strings.TrimSpace(value) == "" {
-		return "", fmt.Errorf("%s is required", name)
-	}
-	return value, nil
-}
-
-type responsesWebSocketDialFunc func(
-	ctx context.Context,
-	requestURL string,
-	header http.Header,
-	info *relaycommon.RelayInfo,
-) (*websocket.Conn, *http.Response, error)
-
-type responsesWebSocketRuntime struct {
-	dial                responsesWebSocketDialFunc
-	beginRateLimit      func(*gin.Context) (*middleware.ModelRequestRateLimitReservation, *middleware.ModelRequestRateLimitError)
-	prepareAccounting   func(*gin.Context, *relaycommon.RelayInfo, dto.Request, bool) *types.NewAPIError
-	consumeUsage        func(*gin.Context, *relaycommon.RelayInfo, *dto.Usage, []string)
-	recordAffinity      func(*gin.Context, int)
-	maxFrameBytes       int64
-	terminalGracePeriod time.Duration
-}
-
-func defaultResponsesWebSocketRuntime() responsesWebSocketRuntime {
-	return responsesWebSocketRuntime{
-		dial:                dialResponsesWebSocketUpstream,
-		beginRateLimit:      middleware.BeginModelRequestRateLimit,
-		prepareAccounting:   PrepareRelayAccounting,
-		consumeUsage:        service.PostTextConsumeQuota,
-		recordAffinity:      service.RecordChannelAffinity,
-		maxFrameBytes:       responsesWebSocketMaxFrameBytes(),
-		terminalGracePeriod: responsesWebSocketTerminalGrace,
-	}
-}
-
-type responsesWebSocketRound struct {
-	ctx             *gin.Context
-	info            *relaycommon.RelayInfo
-	request         *dto.OpenAIResponsesRequest
-	frame           *ResponsesWebSocketFrame
-	outboundStorage common.BodyStorage
-	closeOutbound   bool
-	generate        bool
-	settled         bool
-	rateLimit       *middleware.ModelRequestRateLimitReservation
-}
-
-func (r *responsesWebSocketRound) releaseBody() {
-	if r == nil {
-		return
-	}
-	if r.closeOutbound && r.outboundStorage != nil {
-		_ = r.outboundStorage.Close()
-	}
-	r.outboundStorage = nil
-	if r.frame != nil {
-		_ = r.frame.Close()
-		r.frame = nil
-	}
-}
-
-func (r *responsesWebSocketRound) refund() {
-	if r == nil || r.settled {
-		return
-	}
-	if r.generate && r.info != nil && r.info.Billing != nil {
-		r.info.Billing.Refund(r.ctx)
-	}
-	r.rateLimit.Complete(false)
-	r.settled = true
-}
-
-func (r *responsesWebSocketRound) settleWithoutTerminalUsage(runtime responsesWebSocketRuntime, reason string) {
-	if r == nil || r.settled {
-		return
-	}
-	if !r.generate {
-		r.rateLimit.Complete(false)
-		r.settled = true
-		return
-	}
-	runtime.consumeUsage(r.ctx, r.info, nil, []string{reason})
-	r.rateLimit.Complete(false)
-	r.settled = true
-}
-
-func newResponsesWebSocketRoundContext(base *gin.Context, storage common.BodyStorage) *gin.Context {
-	roundCtx := base.Copy()
-	request := base.Request.Clone(base.Request.Context())
-	request.Header = base.Request.Header.Clone()
-	request.Header.Set("Content-Type", "application/json")
-	request.Method = http.MethodPost
-	request.ContentLength = storage.Size()
-	request.Body = io.NopCloser(storage)
-	roundCtx.Request = request
-	roundCtx.Set(common.KeyBodyStorage, storage)
-	roundCtx.Set(common.KeyBodyStorageReleased, false)
-	roundCtx.Set(common.KeyRequestBody, nil)
-	common.SetContextKey(roundCtx, appconstant.ContextKeyJSONBodyTopLevelFields, nil)
-	common.SetContextKey(roundCtx, appconstant.ContextKeyRequestStartTime, time.Now())
-	common.SetContextKey(roundCtx, common.UpstreamRequestIdKey, "")
-	requestID := common.NewRequestId()
-	roundCtx.Set(common.RequestIdKey, requestID)
-	roundCtx.Request = roundCtx.Request.WithContext(context.WithValue(roundCtx.Request.Context(), common.RequestIdKey, requestID))
-	return roundCtx
-}
-
-func prepareResponsesWebSocketRound(
-	base *gin.Context,
-	frame *ResponsesWebSocketFrame,
-	sessionModel string,
-	runtime responsesWebSocketRuntime,
-) (*responsesWebSocketRound, *ResponsesWebSocketError) {
-	if frame == nil || frame.Storage == nil {
-		return nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeInvalidRequest),
-			errors.New("response.create frame is empty"),
-		)
-	}
-	if frame.Model != sessionModel {
-		return nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeInvalidRequest),
-			fmt.Errorf("model cannot change on a responses websocket connection"),
-		)
-	}
-
-	roundCtx := newResponsesWebSocketRoundContext(base, frame.Storage)
-	reservation, limitErr := runtime.beginRateLimit(roundCtx)
-	if limitErr != nil {
-		statusCode := limitErr.StatusCode
-		closeCode := websocket.CloseTryAgainLater
-		errorType := "rate_limit_error"
-		code := "rate_limit_exceeded"
-		if statusCode != http.StatusTooManyRequests {
-			closeCode = websocket.CloseInternalServerErr
-			errorType = "new_api_error"
-			code = "rate_limit_check_failed"
-		}
-		return nil, newResponsesWebSocketError(
-			statusCode,
-			closeCode,
-			errorType,
-			code,
-			limitErr,
-		)
-	}
-	round := &responsesWebSocketRound{
-		ctx:       roundCtx,
-		frame:     frame,
-		generate:  frame.Generate,
-		rateLimit: reservation,
-	}
-	abortRound := func(wsErr *ResponsesWebSocketError) (*responsesWebSocketRound, *ResponsesWebSocketError) {
-		round.rateLimit.Complete(false)
-		return nil, wsErr
-	}
-
-	request, err := helper.GetAndValidateResponsesRequest(roundCtx)
-	if err != nil {
-		return abortRound(newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeInvalidRequest),
-			err,
-		))
-	}
-	stream := true
-	request.Stream = &stream
-
-	info, err := relaycommon.GenRelayInfo(roundCtx, types.RelayFormatOpenAIResponses, request, nil)
-	if err != nil {
-		return abortRound(newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeGenRelayInfoFailed),
-			err,
-		))
-	}
-	round.info = info
-	round.request = request
-	info.IsStream = true
-	info.InitChannelMeta(roundCtx)
-	if info.ApiType != appconstant.APITypeCodex || info.ChannelType != appconstant.ChannelTypeCodex {
-		return abortRound(newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeGetChannelFailed),
-			fmt.Errorf("responses websocket requires a Codex subscription channel"),
-		))
-	}
-	if err := helper.ModelMappedHelper(roundCtx, info, request); err != nil {
-		return abortRound(newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeChannelModelMappedError),
-			err,
-		))
-	}
-	if err := relaycommon.ApplyCodexClientHeaderPassthroughWithRelayInfo(info); err != nil {
-		return abortRound(newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeChannelParamOverrideInvalid),
-			err,
-		))
-	}
-
-	// A generate=false prewarm still carries the complete prompt. Run sensitive
-	// checks and price initialization with upstream-usage settlement so it
-	// cannot bypass request policy or pre-consume quota for a no-generation turn.
-	useUpstreamUsage := !frame.Generate || operation_setting.SelfUseModeEnabled
-	if accountingErr := runtime.prepareAccounting(roundCtx, info, request, useUpstreamUsage); accountingErr != nil {
-		return abortRound(newResponsesWebSocketError(
-			accountingErr.StatusCode,
-			websocket.ClosePolicyViolation,
-			string(accountingErr.GetErrorType()),
-			string(accountingErr.GetErrorCode()),
-			accountingErr,
-		))
-	}
-
-	mappedModel := ""
-	if info.IsModelMapped {
-		mappedModel = request.Model
-	}
-	round.outboundStorage, round.closeOutbound, err = prepareCodexOriginalResponsesBody(
-		roundCtx,
-		frame.Storage,
-		info,
-		false,
-		mappedModel,
-	)
-	if err != nil {
-		round.refund()
-		return nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeConvertRequestFailed),
-			err,
-		)
-	}
-	return round, nil
-}
-
-func buildResponsesWebSocketUpstream(
-	c *gin.Context,
-	info *relaycommon.RelayInfo,
-) (string, http.Header, *ResponsesWebSocketError) {
-	adaptor := &codex.Adaptor{}
-	requestURL, err := adaptor.GetRequestURL(info)
-	if err != nil {
-		return "", nil, newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeDoRequestFailed),
-			err,
-		)
-	}
-	parsedURL, err := url.Parse(requestURL)
-	if err != nil {
-		return "", nil, newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeDoRequestFailed),
-			err,
-		)
-	}
-	switch parsedURL.Scheme {
-	case "https":
-		parsedURL.Scheme = "wss"
-	case "http":
-		parsedURL.Scheme = "ws"
-	case "wss", "ws":
-	default:
-		return "", nil, newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeDoRequestFailed),
-			fmt.Errorf("unsupported Codex websocket URL scheme %q", parsedURL.Scheme),
-		)
-	}
-
-	header := make(http.Header)
-	if err := adaptor.SetupRequestHeader(c, &header, info); err != nil {
-		return "", nil, newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeDoRequestFailed),
-			err,
-		)
-	}
-	headerOverride, err := channel.ResolveHeaderOverride(info, c)
-	if err != nil {
-		return "", nil, newResponsesWebSocketError(
-			http.StatusBadRequest,
-			websocket.ClosePolicyViolation,
-			"invalid_request_error",
-			string(types.ErrorCodeChannelHeaderOverrideInvalid),
-			err,
-		)
-	}
-	for name, value := range headerOverride {
-		header.Set(name, value)
-	}
-
-	// Transport capability and subscription identity are authoritative server
-	// configuration. They cannot be supplied or replaced by the downstream API
-	// token or a client-controlled header.
-	header.Set("OpenAI-Beta", responsesWebSocketBetaHeader)
-	header.Del("x-openai-actor-authorization")
-	header.Set("Content-Type", "application/json")
-	return parsedURL.String(), header, nil
-}
-
-func dialResponsesWebSocketUpstream(
-	ctx context.Context,
-	requestURL string,
-	header http.Header,
-	info *relaycommon.RelayInfo,
-) (*websocket.Conn, *http.Response, error) {
-	dialer := *websocket.DefaultDialer
-	dialer.HandshakeTimeout = responsesWebSocketDialTimeout
-	dialer.EnableCompression = true
-	if info != nil && strings.TrimSpace(info.ChannelSetting.Proxy) != "" {
-		client, err := service.NewProxyHttpClient(info.ChannelSetting.Proxy)
-		if err != nil {
-			return nil, nil, err
-		}
-		transport, ok := client.Transport.(*http.Transport)
-		if !ok || transport == nil {
-			return nil, nil, fmt.Errorf("unsupported websocket proxy transport %T", client.Transport)
-		}
-		dialer.Proxy = transport.Proxy
-		dialer.NetDialContext = transport.DialContext
-		if transport.TLSClientConfig != nil {
-			dialer.TLSClientConfig = transport.TLSClientConfig.Clone()
-		}
-	}
-	return dialer.DialContext(ctx, requestURL, header)
-}
-
-func safeResponsesWebSocketHandshakeHeaders(header http.Header) map[string]string {
-	if len(header) == 0 {
-		return nil
-	}
-	safeNames := []string{
-		"retry-after",
-		"x-request-id",
-		"x-codex-primary-used-percent",
-		"x-codex-primary-window-minutes",
-		"x-codex-secondary-used-percent",
-		"x-codex-secondary-window-minutes",
-	}
-	result := make(map[string]string)
-	for _, name := range safeNames {
-		if value := strings.TrimSpace(header.Get(name)); value != "" {
-			result[name] = value
-		}
-	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
-}
-
-func writeResponsesWebSocketStoredFrame(conn *websocket.Conn, storage common.BodyStorage) error {
-	if conn == nil || storage == nil {
-		return errors.New("websocket frame storage is nil")
-	}
-	reader, err := storage.NewReader()
-	if err != nil {
-		return err
-	}
-	defer reader.Close()
-
-	_ = conn.SetWriteDeadline(time.Now().Add(responsesWebSocketWriteTimeout))
-	writer, err := conn.NextWriter(websocket.TextMessage)
-	if err != nil {
-		_ = conn.SetWriteDeadline(time.Time{})
-		return err
-	}
-	_, copyErr := io.Copy(writer, reader)
-	closeErr := writer.Close()
-	_ = conn.SetWriteDeadline(time.Time{})
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
-
-type responsesWebSocketReadResult struct {
-	frame *ResponsesWebSocketFrame
-	err   *ResponsesWebSocketError
-}
-
-func startResponsesWebSocketReader(
-	ctx context.Context,
-	conn *websocket.Conn,
-	maxBytes int64,
-	validateResponseCreate bool,
-) <-chan responsesWebSocketReadResult {
-	results := make(chan responsesWebSocketReadResult)
-	go func() {
-		defer close(results)
-		for {
-			var frame *ResponsesWebSocketFrame
-			var wsErr *ResponsesWebSocketError
-			if validateResponseCreate {
-				frame, wsErr = ReadResponsesWebSocketFrame(conn, maxBytes)
-			} else {
-				frame, wsErr = readResponsesWebSocketTextFrame(conn, maxBytes)
-			}
-			result := responsesWebSocketReadResult{frame: frame, err: wsErr}
-			select {
-			case results <- result:
-				if wsErr != nil {
-					return
-				}
-			case <-ctx.Done():
-				if frame != nil {
-					_ = frame.Close()
-				}
-				return
-			}
-		}
-	}()
-	return results
-}
-
-func readResponsesWebSocketEvent(frame *ResponsesWebSocketFrame) (string, *dto.ResponsesBillingStreamResponse, error) {
-	if frame == nil || frame.Storage == nil {
-		return "", nil, errors.New("upstream websocket frame is empty")
-	}
-	fields, err := common.IndexTopLevelJSONObject(frame.Storage, frame.Storage.Size())
-	if err != nil {
-		return "", nil, err
-	}
-	fieldsByName := make(map[string]common.JSONFieldSpan, len(fields))
-	for _, field := range fields {
-		fieldsByName[field.Name] = field
-	}
-	eventType, err := readResponsesWebSocketStringField(frame.Storage, fieldsByName, "type", true)
-	if err != nil {
-		return "", nil, err
-	}
-
-	if eventType != "response.completed" && eventType != dto.ResponsesOutputTypeItemDone {
-		return eventType, nil, nil
-	}
-	if _, err := frame.Storage.Seek(0, io.SeekStart); err != nil {
-		return "", nil, err
-	}
-	var event dto.ResponsesBillingStreamResponse
-	if err := common.DecodeJson(frame.Storage, &event); err != nil {
-		return "", nil, err
-	}
-	_, _ = frame.Storage.Seek(0, io.SeekStart)
-	return eventType, &event, nil
-}
-
-func observeResponsesWebSocketBuiltInTool(info *relaycommon.RelayInfo, event *dto.ResponsesBillingStreamResponse) {
-	if info == nil || info.ResponsesUsageInfo == nil || info.ResponsesUsageInfo.BuiltInTools == nil ||
-		event == nil || event.Item == nil || event.Item.Type != dto.BuildInCallWebSearchCall {
-		return
-	}
-	for _, toolName := range []string{dto.BuildInToolWebSearch, dto.BuildInToolWebSearchPreview} {
-		if tool, exists := info.ResponsesUsageInfo.BuiltInTools[toolName]; exists && tool != nil {
-			tool.CallCount++
-			return
-		}
-	}
-}
-
-func settleResponsesWebSocketRound(
-	round *responsesWebSocketRound,
-	event *dto.ResponsesBillingStreamResponse,
-	runtime responsesWebSocketRuntime,
-) {
-	if round == nil || round.settled {
-		return
-	}
-	var source *dto.ResponsesBillingUsage
-	if event != nil && event.Response != nil {
-		source = event.Response.Usage
-		if quality, size, ok := event.Response.ImageGenerationCall(); ok {
-			round.ctx.Set("image_generation_call", true)
-			round.ctx.Set("image_generation_call_quality", quality)
-			round.ctx.Set("image_generation_call_size", size)
-		}
-	}
-	if !round.generate {
-		// ChatGPT reports input usage for generate=false prewarm, but Codex treats
-		// it as connection setup rather than an inference request and excludes it
-		// from turn usage. Policy and total-request limiting already ran before the
-		// frame was sent; do not create a quota/log entry for setup-only usage.
-		round.rateLimit.Complete(false)
-		round.settled = true
-		return
-	}
-	usage := openai.ResponsesBillingUsageToUsage(source)
-	runtime.consumeUsage(round.ctx, round.info, usage, nil)
-	round.rateLimit.Complete(true)
-	round.settled = true
-}
-
-func forwardResponsesWebSocketEvent(
-	client *websocket.Conn,
-	frame *ResponsesWebSocketFrame,
-	eventType string,
-	event *dto.ResponsesBillingStreamResponse,
-) error {
-	if eventType == "response.completed" && event != nil {
-		if compacted, ok, err := openai.CompactCodexCompletedEvent(event); err != nil {
-			return err
-		} else if ok {
-			_ = client.SetWriteDeadline(time.Now().Add(responsesWebSocketWriteTimeout))
-			err = client.WriteMessage(websocket.TextMessage, compacted)
-			_ = client.SetWriteDeadline(time.Time{})
-			return err
-		}
-	}
-	return writeResponsesWebSocketStoredFrame(client, frame.Storage)
-}
-
-func upstreamResponsesWebSocketFrameError(err *ResponsesWebSocketError) *ResponsesWebSocketError {
-	if err == nil {
-		return nil
-	}
-	if closeErr, ok := err.Err.(*websocket.CloseError); ok {
-		return &ResponsesWebSocketError{
-			StatusCode: http.StatusBadGateway,
-			CloseCode:  closeErr.Code,
-			Type:       "upstream_error",
-			Code:       string(types.ErrorCodeDoRequestFailed),
-			Message:    closeErr.Text,
-			Err:        closeErr,
-		}
-	}
-	err.StatusCode = http.StatusBadGateway
-	err.CloseCode = websocket.CloseInternalServerErr
-	err.Type = "upstream_error"
-	err.Code = string(types.ErrorCodeDoRequestFailed)
-	return err
-}
-
-func isResponsesWebSocketDisconnect(wsErr *ResponsesWebSocketError) bool {
-	if wsErr == nil {
-		return false
-	}
-	var closeErr *websocket.CloseError
-	if errors.As(wsErr.Err, &closeErr) {
-		return true
-	}
-	return wsErr.CloseCode == websocket.CloseGoingAway
-}
-
-func drainResponsesWebSocketRound(
-	upstreamFrames <-chan responsesWebSocketReadResult,
-	round **responsesWebSocketRound,
-	runtime responsesWebSocketRuntime,
-	timeout time.Duration,
-	settleMissingUsage bool,
-) {
-	if round == nil || *round == nil {
-		return
-	}
-	if timeout <= 0 {
-		timeout = responsesWebSocketTerminalGrace
-	}
-	timer := time.NewTimer(timeout)
+	client.SetReadLimit(int64(maxMB) << 20)
 	defer func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		// Unless an earlier shutdown ended the read, the client closed or left.
+		// Gorilla already answered a client close frame, so this tells the upstream.
+		s.shutdown(websocket.CloseNormalClosure, "")
+		s.workers.Wait()
 	}()
-
-	finishMissing := func() {
-		if *round == nil {
-			return
-		}
-		if settleMissingUsage {
-			(*round).settleWithoutTerminalUsage(runtime, "WebSocket 协议异常，未收到上游终态 usage")
-		} else {
-			(*round).refund()
-		}
-		*round = nil
-	}
-
-	for *round != nil {
-		select {
-		case result, ok := <-upstreamFrames:
-			if !ok || result.err != nil {
-				finishMissing()
-				return
-			}
-			if (*round).info != nil {
-				(*round).info.SetFirstResponseTime()
-				(*round).info.ReceivedResponseCount++
-			}
-			eventType, event, err := readResponsesWebSocketEvent(result.frame)
-			_ = result.frame.Close()
-			if err != nil {
-				finishMissing()
-				return
-			}
-			if eventType == dto.ResponsesOutputTypeItemDone {
-				observeResponsesWebSocketBuiltInTool((*round).info, event)
-			}
-			switch eventType {
-			case "response.completed":
-				settleResponsesWebSocketRound(*round, event, runtime)
-				*round = nil
-			case "error", "response.failed", "response.incomplete":
-				finishMissing()
-			}
-		case <-timer.C:
-			finishMissing()
-		}
-	}
-}
-
-// ResponsesWebSocketHelper runs one persistent downstream/upstream Responses
-// session. The selected Codex channel in c is fixed for the lifetime of the
-// connection; reconnecting or switching accounts behind previous_response_id
-// is intentionally forbidden.
-func ResponsesWebSocketHelper(
-	c *gin.Context,
-	client *websocket.Conn,
-	firstFrame *ResponsesWebSocketFrame,
-) *types.NewAPIError {
-	return responsesWebSocketHelperWithRuntime(c, client, firstFrame, defaultResponsesWebSocketRuntime())
-}
-
-func responsesWebSocketHelperWithRuntime(
-	c *gin.Context,
-	client *websocket.Conn,
-	firstFrame *ResponsesWebSocketFrame,
-	runtime responsesWebSocketRuntime,
-) *types.NewAPIError {
-	if runtime.maxFrameBytes <= 0 {
-		runtime.maxFrameBytes = responsesWebSocketMaxFrameBytes()
-	}
-	if runtime.terminalGracePeriod <= 0 {
-		runtime.terminalGracePeriod = responsesWebSocketTerminalGrace
-	}
-	if runtime.dial == nil || runtime.beginRateLimit == nil || runtime.prepareAccounting == nil || runtime.consumeUsage == nil || runtime.recordAffinity == nil {
-		wsErr := newResponsesWebSocketError(
-			http.StatusInternalServerError,
-			websocket.CloseInternalServerErr,
-			"new_api_error",
-			string(types.ErrorCodeDoRequestFailed),
-			errors.New("responses websocket runtime is incomplete"),
-		)
-		WriteResponsesWebSocketError(client, wsErr)
-		return types.NewError(wsErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-
-	sessionModel := firstFrame.Model
-	firstRound, wsErr := prepareResponsesWebSocketRound(c, firstFrame, sessionModel, runtime)
-	if wsErr != nil {
-		_ = firstFrame.Close()
-		WriteResponsesWebSocketError(client, wsErr)
-		return types.NewError(wsErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
-	}
-	upstreamURL, upstreamHeader, wsErr := buildResponsesWebSocketUpstream(firstRound.ctx, firstRound.info)
-	if wsErr != nil {
-		firstRound.refund()
-		firstRound.releaseBody()
-		WriteResponsesWebSocketError(client, wsErr)
-		return types.NewError(wsErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-
-	upstream, handshakeResponse, err := runtime.dial(c.Request.Context(), upstreamURL, upstreamHeader, firstRound.info)
-	if handshakeResponse != nil && handshakeResponse.Body != nil {
-		defer handshakeResponse.Body.Close()
-	}
-	if err != nil {
-		firstRound.refund()
-		firstRound.releaseBody()
-		statusCode := http.StatusBadGateway
-		headers := map[string]string(nil)
-		if handshakeResponse != nil {
-			if handshakeResponse.StatusCode >= 100 && handshakeResponse.StatusCode <= 599 {
-				statusCode = handshakeResponse.StatusCode
-			}
-			headers = safeResponsesWebSocketHandshakeHeaders(handshakeResponse.Header)
-		}
-		wsErr = newResponsesWebSocketError(
-			statusCode,
-			websocket.CloseInternalServerErr,
-			"upstream_error",
-			string(types.ErrorCodeDoRequestFailed),
-			fmt.Errorf("upstream websocket handshake failed: %w", err),
-		)
-		wsErr.Headers = headers
-		WriteResponsesWebSocketError(client, wsErr)
-		return types.NewError(wsErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	defer upstream.Close()
-
-	if err := writeResponsesWebSocketStoredFrame(upstream, firstRound.outboundStorage); err != nil {
-		firstRound.refund()
-		firstRound.releaseBody()
-		wsErr = newResponsesWebSocketError(
-			http.StatusBadGateway,
-			websocket.CloseInternalServerErr,
-			"upstream_error",
-			string(types.ErrorCodeDoRequestFailed),
-			err,
-		)
-		WriteResponsesWebSocketError(client, wsErr)
-		return types.NewError(wsErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
-	}
-	firstRound.releaseBody()
-	common.ReleaseBodyStorage(c)
-
-	readerCtx, cancelReaders := context.WithCancel(c.Request.Context())
-	defer cancelReaders()
-	downstreamFrames := startResponsesWebSocketReader(readerCtx, client, runtime.maxFrameBytes, true)
-	upstreamFrames := startResponsesWebSocketReader(readerCtx, upstream, runtime.maxFrameBytes, false)
-	activeRound := firstRound
-	affinityRecorded := false
-
-	refundActive := func() {
-		if activeRound != nil {
-			activeRound.refund()
-			activeRound = nil
-		}
-	}
 
 	for {
-		select {
-		case result, ok := <-downstreamFrames:
-			if !ok || (result.err != nil && isResponsesWebSocketDisconnect(result.err)) {
-				drainResponsesWebSocketRound(
-					upstreamFrames,
-					&activeRound,
-					runtime,
-					runtime.terminalGracePeriod,
-					true,
-				)
-				if result.err != nil {
-					var closeErr *websocket.CloseError
-					if errors.As(result.err.Err, &closeErr) {
-						writeResponsesWebSocketClose(upstream, closeErr.Code, closeErr.Text)
-					}
+		_, message, err := client.ReadMessage()
+		if err != nil {
+			return nil
+		}
+		envelope, streamID, err := parseResponsesWSEnvelope(message)
+		eventType := envelope.Type
+		if err != nil {
+			s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(err))
+			continue
+		}
+		if eventType != responsesWSEventTypeResponseCreate {
+			// Controls are owned by the active request too. In particular a cancel
+			// arriving during authentication must not precede its upstream create.
+			state := s.getCurrent()
+			if eventType != "response.cancel" || state == nil {
+				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(fmt.Errorf("unsupported websocket event %q", eventType)))
+				continue
+			}
+			select {
+			case state.controls <- responsesWSControl{body: message, eventID: envelope.EventID, streamID: streamID}:
+			case <-state.done:
+			case <-s.ctx.Done():
+				return nil
+			default:
+				s.sendError(envelope.EventID, streamID, newResponsesWSInvalidRequestError(errors.New("a response control event is already pending")))
+			}
+			continue
+		}
+		state := &responsesWSCallState{inbox: make(chan responsesWSMessage), controls: make(chan responsesWSControl, 1), done: make(chan struct{})}
+		if !s.tryReserveCurrent(state) {
+			s.sendError(envelope.EventID, streamID, types.NewErrorWithStatusCode(errors.New("another response.create is already in progress on this websocket connection"), types.ErrorCodeInvalidRequest, http.StatusConflict, types.ErrOptionWithSkipRetry()))
+			continue
+		}
+		requestID := fmt.Sprintf("%s-ws-%d", s.requestID, s.nextEventIndex)
+		s.nextEventIndex++
+		s.workers.Go(func() { s.runRequest(state, message, envelope, streamID, requestID) })
+	}
+}
+
+func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []byte, envelope responsesWSCreateEvent, streamID string, requestID string) {
+	create, parseErr := normalizeResponsesWSCreateEvent(message, envelope, streamID)
+	var apiErr *types.NewAPIError
+	var upstreamURLs []string
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			apiErr = types.NewError(fmt.Errorf("responses websocket request panic: %v", recovered), types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
+			state.closeCode = websocket.CloseInternalServerErr
+		}
+		// Finish the middleware count before publishing the terminal event. Hold
+		// admission while writing it so an immediate next create cannot race
+		// the current request's release. A failing request also shuts down
+		// before that release, so a concurrent upstream close cannot report it
+		// as a normal closure; shutdown itself takes neither lock.
+		outgoing := state.terminal
+		if apiErr != nil {
+			if body, err := buildResponsesWSErrorPayload(envelope.EventID, streamID, apiErr, upstreamURLs...); err == nil {
+				outgoing = &responsesWSMessage{kind: websocket.TextMessage, body: body}
+			}
+		}
+		s.clientWriteMu.Lock()
+		s.stateMu.Lock()
+		if outgoing != nil {
+			if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(outgoing.body))); err != nil {
+				state.closeCode = websocket.CloseInternalServerErr
+			} else if err := s.client.WriteMessage(outgoing.kind, outgoing.body); err != nil {
+				state.closeCode = websocket.CloseInternalServerErr
+			}
+		}
+		if state.closeCode != 0 {
+			s.shutdown(state.closeCode, state.closeReason)
+		}
+		s.current = nil
+		close(state.done)
+		s.stateMu.Unlock()
+		s.clientWriteMu.Unlock()
+	}()
+	request := s.request.Clone(s.ctx)
+	request.Body = io.NopCloser(bytes.NewReader(message))
+	request.ContentLength = int64(len(message))
+	request.Header.Set("Content-Type", "application/json")
+	apiErr = s.runner(request, requestID, func(c *gin.Context) *types.NewAPIError {
+		if parseErr != nil {
+			return newResponsesWSInvalidRequestError(parseErr)
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(create.Body))
+		c.Request.ContentLength = int64(len(create.Body))
+		callErr := s.runCall(c, state, create)
+		upstreamURLs = common.UpstreamAddresses(c)
+		return callErr
+	})
+	if apiErr != nil && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+		state.closeCode = websocket.ClosePolicyViolation
+	}
+}
+
+func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState, create responsesWSCreateRequest) (apiErr *types.NewAPIError) {
+	policy := service.RequestPolicy(c)
+	modelName := create.Request.Model
+	started := time.Now()
+	var info *relaycommon.RelayInfo
+	billingPrepared := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			apiErr = types.NewError(fmt.Errorf("responses websocket call panic: %v", recovered), types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
+			state.closeCode = websocket.CloseInternalServerErr
+		}
+		if info == nil && modelName != "" {
+			info = &relaycommon.RelayInfo{OriginModelName: modelName, UsingGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), StartTime: started}
+		}
+		perfmetrics.RecordRelayResult(c.Request.Context(), info, apiErr)
+		// Settlement already marks the request policy successful, and nothing
+		// reads a termination decision after this point on the WebSocket path,
+		// so neither policy record belongs here.
+		if info != nil && billingPrepared {
+			apiErr = RefundFailedRequestBilling(c, info, apiErr)
+		}
+	}()
+	if modelName == "" {
+		return newResponsesWSInvalidRequestError(errors.New("model is required"))
+	}
+	if s.lockedModel != "" && modelName != s.lockedModel {
+		return newResponsesWSInvalidRequestError(fmt.Errorf("responses websocket connection is locked to model %q", s.lockedModel))
+	}
+	if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
+		return apiErr
+	}
+	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
+	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
+	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
+
+	if s.lockedChannelID != 0 {
+		if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
+			return apiErr
+		}
+		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
+		info.IsStream = true
+		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
+		if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
+			return apiErr
+		}
+		billingPrepared = true
+		var payload []byte
+		payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+		if apiErr != nil {
+			return apiErr
+		}
+		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
+			state.closeCode = websocket.CloseInternalServerErr
+			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
+		}
+	} else {
+		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+		for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
+			var channel *appmodel.Channel
+			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
+			if apiErr != nil {
+				return apiErr
+			}
+			service.AppendUsedChannel(c, channel.Id)
+			if info == nil {
+				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
+				info.IsStream = true
+				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
+				if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
+					return apiErr
 				}
+				billingPrepared = true
+			} else {
+				info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
+				if apiErr = service.PrepareTieredBillingForSelectedGroup(c, info); apiErr != nil {
+					return apiErr
+				}
+			}
+			info.RetryIndex = retry.GetRetry()
+			policy.BeginAttempt(channel, info.UsingGroup)
+			var payload []byte
+			payload, apiErr = buildResponsesWSCreatePayload(c, info, create.Request, create.Generate, create.StreamID)
+			if apiErr != nil {
+				return apiErr
+			}
+			adaptor := GetAdaptor(info.ApiType)
+			adaptor.Init(info)
+			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
+			if dialErr != nil {
+				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
+				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
+				info.LastError = apiErr
+				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
+				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
+				service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
+				if decision.Action == "retry" {
+					continue
+				}
+				return apiErr
+			}
+			if !s.setTarget(target) {
+				return types.NewError(context.Canceled, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
+			}
+			if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
+				state.closeCode = websocket.CloseInternalServerErr
+				return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
+			}
+			s.lockedModel, s.lockedChannelID, s.lockedGroup = modelName, channel.Id, info.UsingGroup
+			s.lockedKey, s.lockedKeyIndex = info.ApiKey, info.ChannelMultiKeyIndex
+			s.lockedRoute, _ = channel.GetOtherSettings().AdvancedCustom.MatchPathForModel(c.Request.URL.Path, modelName)
+			s.lockedContext = make(map[appconstant.ContextKey]any)
+			for _, key := range []appconstant.ContextKey{
+				appconstant.ContextKeyChannelId, appconstant.ContextKeyChannelName, appconstant.ContextKeyChannelType,
+				appconstant.ContextKeyChannelCreateTime, appconstant.ContextKeyChannelSetting, appconstant.ContextKeyChannelOtherSetting,
+				appconstant.ContextKeyChannelParamOverride, appconstant.ContextKeyChannelHeaderOverride, appconstant.ContextKeyChannelOrganization,
+				appconstant.ContextKeyChannelAutoBan, appconstant.ContextKeyChannelModelMapping, appconstant.ContextKeyChannelStatusCodeMapping,
+				appconstant.ContextKeyChannelIsMultiKey, appconstant.ContextKeyChannelMultiKeyIndex, appconstant.ContextKeyChannelKey, appconstant.ContextKeyChannelBaseUrl,
+				appconstant.ContextKeyUpstreamRequestOrigin,
+			} {
+				if value, ok := c.Get(string(key)); ok {
+					s.lockedContext[key] = value
+				}
+			}
+			s.registerChannelClose(channel.Id)
+			s.startTargetReader(target)
+			apiErr = nil
+			break
+		}
+		if apiErr != nil {
+			return apiErr
+		}
+	}
+
+	accumulator := service.NewResponsesUsageAccumulator(info)
+	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus.RequireTerminal()
+	common.SetContextKey(c, appconstant.ContextKeyResponseStreamStatus, info.StreamStatus)
+	timeout := time.Duration(appconstant.StreamingTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 300 * time.Second
+	}
+	idle := time.NewTimer(timeout)
+	defer idle.Stop()
+	accepted := false
+	var pendingControl []byte
+	var sentControl []byte
+	var responseID string
+	for {
+		select {
+		case incoming := <-state.inbox:
+			idle.Reset(timeout)
+			if incoming.err != nil {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, incoming.err)
+				state.closeCode, state.closeReason = websocket.CloseInternalServerErr, "upstream connection closed"
+				ConsumeResponsesQuota(c, info, accumulator.Finish())
 				return nil
 			}
-			if result.err != nil {
-				WriteResponsesWebSocketError(client, result.err)
-				drainResponsesWebSocketRound(
-					upstreamFrames,
-					&activeRound,
-					runtime,
-					runtime.terminalGracePeriod,
-					true,
-				)
-				writeResponsesWebSocketClose(upstream, websocket.ClosePolicyViolation, "invalid downstream websocket frame")
-				return types.NewError(result.err, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
+			info.SetFirstResponseTime()
+			var event struct {
+				dto.ResponsesStreamResponse
+				StreamID string `json:"stream_id"`
 			}
-			if activeRound != nil {
-				_ = result.frame.Close()
-				wsErr = newResponsesWebSocketError(
-					http.StatusConflict,
-					websocket.ClosePolicyViolation,
-					"invalid_request_error",
-					string(types.ErrorCodeInvalidRequest),
-					errors.New("a response.create request is already active"),
-				)
-				WriteResponsesWebSocketError(client, wsErr)
-				drainResponsesWebSocketRound(
-					upstreamFrames,
-					&activeRound,
-					runtime,
-					runtime.terminalGracePeriod,
-					true,
-				)
-				writeResponsesWebSocketClose(upstream, websocket.ClosePolicyViolation, "concurrent response.create")
-				return types.NewError(wsErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
-			}
-			if !result.frame.Generate {
-				_ = result.frame.Close()
-				wsErr = newResponsesWebSocketError(
-					http.StatusBadRequest,
-					websocket.ClosePolicyViolation,
-					"invalid_request_error",
-					string(types.ErrorCodeInvalidRequest),
-					errors.New("generate=false is only allowed on the first response.create frame"),
-				)
-				WriteResponsesWebSocketError(client, wsErr)
-				return types.NewError(wsErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
-			}
-
-			nextRound, prepareErr := prepareResponsesWebSocketRound(c, result.frame, sessionModel, runtime)
-			if prepareErr != nil {
-				_ = result.frame.Close()
-				WriteResponsesWebSocketError(client, prepareErr)
-				return types.NewError(prepareErr, types.ErrorCodeInvalidRequest, types.ErrOptionWithSkipRetry())
-			}
-			if err := writeResponsesWebSocketStoredFrame(upstream, nextRound.outboundStorage); err != nil {
-				nextRound.refund()
-				nextRound.releaseBody()
-				wsErr = newResponsesWebSocketError(
-					http.StatusBadGateway,
-					websocket.CloseInternalServerErr,
-					"upstream_error",
-					string(types.ErrorCodeDoRequestFailed),
-					err,
-				)
-				WriteResponsesWebSocketError(client, wsErr)
-				return types.NewError(wsErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
-			}
-			nextRound.releaseBody()
-			activeRound = nextRound
-
-		case result, ok := <-upstreamFrames:
-			if !ok || result.err != nil {
-				refundActive()
-				if result.err != nil {
-					upstreamErr := upstreamResponsesWebSocketFrameError(result.err)
-					if closeErr, isClose := result.err.Err.(*websocket.CloseError); isClose {
-						writeResponsesWebSocketClose(client, closeErr.Code, closeErr.Text)
+			if err := common.Unmarshal(incoming.body, &event); err != nil {
+				info.StreamStatus.RecordError("invalid upstream websocket event")
+			} else {
+				if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
+					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+						s.shutdown(websocket.CloseInternalServerErr, "")
+					}
+					continue
+				}
+				// A repeated terminal from the previous response must never finish
+				// a subsequent request on this persistent connection.
+				if event.Response != nil && event.Response.ID != "" && event.Response.ID == s.lastResponseID {
+					continue
+				}
+				if event.Type == "error" {
+					var rejection responsesWSErrorEvent
+					_ = common.Unmarshal(incoming.body, &rejection)
+					if rejection.ResponseID != "" && rejection.ResponseID == s.lastResponseID {
+						continue
+					}
+					terminal, ambiguous, controlError := responsesWSErrorEndsRequest(rejection, create.StreamID, responseID, sentControl)
+					if !terminal {
+						if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+							s.shutdown(websocket.CloseInternalServerErr, "")
+						}
+						// Only a control error in this stream resolves its pending control.
+						if controlError {
+							sentControl = nil
+						}
+						continue
+					}
+					if accepted {
+						if rejection.Error != nil {
+							code := ""
+							if rejection.Error.Code != nil {
+								code = fmt.Sprint(rejection.Error.Code)
+							}
+							info.StreamStatus.MarkFailed(code, rejection.Error.Type, rejection.Status)
+						}
+						accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
+						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+						s.lastResponseID = responseID
+						state.terminal = &incoming
+						if ambiguous {
+							state.closeCode = websocket.CloseInternalServerErr
+						}
+						ConsumeResponsesQuota(c, info, accumulator.Finish())
 						return nil
 					}
-					WriteResponsesWebSocketError(client, upstreamErr)
-					return types.NewError(upstreamErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+					if rejection.Error == nil {
+						// An error frame without an error object still describes the
+						// rejected request; keep the client-facing type stable.
+						rejection.Error = &types.OpenAIError{Type: "invalid_request_error", Message: event.Message, Code: event.Code}
+					}
+					rejected := types.WithOpenAIError(*rejection.Error, rejection.Status, types.ErrOptionWithSkipRetry())
+					if rejected.StatusCode < 400 || rejected.StatusCode > 599 {
+						rejected.StatusCode = http.StatusBadRequest
+					}
+					return rejected
 				}
-				writeResponsesWebSocketClose(client, websocket.CloseGoingAway, "upstream websocket closed")
-				return nil
-			}
-
-			eventRound := activeRound
-			if eventRound != nil && eventRound.info != nil {
-				eventRound.info.SetFirstResponseTime()
-				eventRound.info.ReceivedResponseCount++
-			}
-			eventType, event, eventErr := readResponsesWebSocketEvent(result.frame)
-			if eventErr != nil {
-				_ = result.frame.Close()
-				refundActive()
-				wsErr = newResponsesWebSocketError(
-					http.StatusBadGateway,
-					websocket.CloseInvalidFramePayloadData,
-					"upstream_error",
-					string(types.ErrorCodeBadResponseBody),
-					eventErr,
-				)
-				WriteResponsesWebSocketError(client, wsErr)
-				return types.NewError(wsErr, types.ErrorCodeBadResponseBody, types.ErrOptionWithSkipRetry())
-			}
-			if eventType == dto.ResponsesOutputTypeItemDone && activeRound != nil {
-				observeResponsesWebSocketBuiltInTool(activeRound.info, event)
-			}
-			if eventType == "response.completed" {
-				settleResponsesWebSocketRound(activeRound, event, runtime)
-				if activeRound != nil && activeRound.generate && !affinityRecorded {
-					runtime.recordAffinity(c, activeRound.info.ChannelId)
-					affinityRecorded = true
+				if strings.HasPrefix(event.Type, "response.") {
+					if !accepted {
+						// Like HTTP, bind the session only once upstream accepted the request.
+						service.RecordChannelAffinity(c, s.lockedChannelID)
+					}
+					accepted = true
+					if event.Response != nil && event.Response.ID != "" {
+						responseID = event.Response.ID
+					}
 				}
-				activeRound = nil
+				accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
 			}
-
-			if err := forwardResponsesWebSocketEvent(client, result.frame, eventType, event); err != nil {
-				_ = result.frame.Close()
-				drainResponsesWebSocketRound(
-					upstreamFrames,
-					&activeRound,
-					runtime,
-					runtime.terminalGracePeriod,
-					true,
-				)
+			switch event.Type {
+			case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
+				if event.Response != nil {
+					s.lastResponseID = event.Response.ID
+				}
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				state.terminal = &incoming
+				ConsumeResponsesQuota(c, info, accumulator.Finish())
 				return nil
 			}
-			if eventRound != nil && eventRound.info != nil {
-				eventRound.info.SendResponseCount++
+			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
+				s.shutdown(websocket.CloseInternalServerErr, "")
 			}
-			_ = result.frame.Close()
-
-			if eventType == "error" || eventType == "response.failed" || eventType == "response.incomplete" {
-				refundActive()
-				writeResponsesWebSocketClose(client, websocket.CloseInternalServerErr, "upstream response failed")
-				return nil
+			if accepted && pendingControl != nil {
+				if err := s.writeTarget(websocket.TextMessage, pendingControl); err != nil {
+					s.shutdown(websocket.CloseInternalServerErr, "")
+				}
+				sentControl = pendingControl
+				pendingControl = nil
 			}
+		case control := <-state.controls:
+			if pendingControl != nil || sentControl != nil {
+				s.sendError(control.eventID, control.streamID, newResponsesWSInvalidRequestError(errors.New("a response control event is already pending")))
+				continue
+			}
+			if !accepted {
+				pendingControl = control.body
+				continue
+			}
+			if err := s.writeTarget(websocket.TextMessage, control.body); err != nil {
+				s.shutdown(websocket.CloseInternalServerErr, "")
+			}
+			sentControl = control.body
+		case <-idle.C:
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, context.DeadlineExceeded)
+			state.closeCode, state.closeReason = websocket.CloseInternalServerErr, "upstream response timed out"
+			ConsumeResponsesQuota(c, info, accumulator.Finish())
+			return nil
+		case <-s.ctx.Done():
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, s.ctx.Err())
+			ConsumeResponsesQuota(c, info, accumulator.Finish())
+			return nil
 		}
 	}
 }
 
-func logResponsesWebSocketError(c *gin.Context, err error) {
-	if err == nil {
+// A single generation is active, but a cancel can fail independently. Correlate
+// available IDs first; uncorrelated control/server errors require a bounded
+// connection close because continuing could leave the generation stuck forever.
+func responsesWSErrorEndsRequest(event responsesWSErrorEvent, streamID, responseID string, control []byte) (terminal, ambiguous, controlError bool) {
+	if len(control) > 0 {
+		var pending struct {
+			EventID    string `json:"event_id"`
+			StreamID   string `json:"stream_id"`
+			ResponseID string `json:"response_id"`
+		}
+		_ = common.Unmarshal(control, &pending)
+		if event.EventID != "" && event.EventID == pending.EventID {
+			return false, false, true
+		}
+		if event.ResponseID != "" && event.ResponseID == pending.ResponseID && event.ResponseID != responseID {
+			return false, false, true
+		}
+		if (event.StreamID == "" || event.StreamID == pending.StreamID) && event.Error != nil && event.Error.Type == "invalid_request_error" {
+			switch event.Error.Code {
+			case "response_not_found", "response_not_active", "response_already_completed":
+				return false, false, true
+			}
+		}
+	}
+	if event.StreamID != "" && event.StreamID != streamID || responseID != "" && event.ResponseID != "" && event.ResponseID != responseID {
+		return false, false, false
+	}
+	return true, len(control) > 0 && event.ResponseID == "", false
+}
+
+func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model string) *types.NewAPIError {
+	// The channel type is not rechecked: a locked channel keeps its type, and
+	// the FilterResponsesWebSocket rules were applied when it was selected.
+	channel, err := appmodel.CacheGetChannel(s.lockedChannelID)
+	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
+		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	keyEnabled := channel.Key == s.lockedKey
+	if channel.ChannelInfo.IsMultiKey {
+		keys := channel.GetKeys()
+		status := channel.ChannelInfo.MultiKeyStatusList[s.lockedKeyIndex]
+		keyEnabled = s.lockedKeyIndex >= 0 && s.lockedKeyIndex < len(keys) && keys[s.lockedKeyIndex] == s.lockedKey && (status == 0 || status == common.ChannelStatusEnabled)
+	}
+	if !keyEnabled {
+		return types.NewErrorWithStatusCode(errors.New("the upstream connection credential is no longer enabled"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	// Changes that alter the physical upstream connection require a new
+	// handshake. Request-level settings can be refreshed without rotating keys.
+	if channel.GetBaseURL() != s.lockedContext[appconstant.ContextKeyChannelBaseUrl] ||
+		!reflect.DeepEqual(channel.GetHeaderOverride(), s.lockedContext[appconstant.ContextKeyChannelHeaderOverride]) {
+		return types.NewErrorWithStatusCode(errors.New("upstream connection settings changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	if previous, ok := s.lockedContext[appconstant.ContextKeyChannelSetting].(dto.ChannelSettings); ok && previous.Proxy != channel.GetSetting().Proxy {
+		return types.NewErrorWithStatusCode(errors.New("upstream proxy changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	// An advanced custom connection was dialed through the route matched for
+	// this model. Only the fields that shape the upstream handshake force a
+	// reconnect: target path, protocol conversion and credential placement.
+	// Other channel types match the zero route on both sides.
+	route, _ := channel.GetOtherSettings().AdvancedCustom.MatchPathForModel(c.Request.URL.Path, model)
+	if strings.TrimSpace(route.UpstreamPath) != strings.TrimSpace(s.lockedRoute.UpstreamPath) ||
+		route.IsNative() != s.lockedRoute.IsNative() ||
+		!reflect.DeepEqual(route.Auth, s.lockedRoute.Auth) {
+		return types.NewErrorWithStatusCode(errors.New("upstream route changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	if pin, found, _ := service.GetChannelConstraints(c).ResolvedPin(); found {
+		if pin.ChannelId != s.lockedChannelID {
+			return types.NewErrorWithStatusCode(errors.New("channel pin changed; reconnect required"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	} else {
+		group := common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup)
+		if group == "auto" {
+			if !slices.Contains(service.GetRequestAutoGroups(c, common.GetContextKeyString(c, appconstant.ContextKeyUserGroup)), s.lockedGroup) {
+				return types.NewErrorWithStatusCode(errors.New("the connection group is no longer allowed"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+			}
+			group = s.lockedGroup
+			common.SetContextKey(c, appconstant.ContextKeyAutoGroup, group)
+		}
+		if !appmodel.IsChannelEnabledForGroupModel(group, model, s.lockedChannelID) {
+			return types.NewErrorWithStatusCode(errors.New("the connection channel is no longer allowed for this group and model"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+		}
+	}
+	for key, value := range s.lockedContext {
+		c.Set(string(key), value)
+	}
+	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, channel.GetSetting())
+	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
+	common.SetContextKey(c, appconstant.ContextKeyChannelParamOverride, channel.GetParamOverride())
+	common.SetContextKey(c, appconstant.ContextKeyChannelModelMapping, channel.GetModelMapping())
+	common.SetContextKey(c, appconstant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
+	policy := service.RequestPolicy(c)
+	policy.BeginAttempt(channel, s.lockedGroup)
+	policy.AddEvent(service.PolicyEvent{ChannelID: channel.Id, Decision: service.PolicyDecision{Action: "select", Reason: "pinned_channel", Source: "channel_constraint"}})
+	return nil
+}
+
+func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, req dto.OpenAIResponsesRequest, generate common.RawMessage, streamID string) ([]byte, *types.NewAPIError) {
+	_, body, closer, apiErr := PrepareResponsesRequest(c, info, &req)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	defer closer.Close()
+	jsonData, err := io.ReadAll(body)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+	}
+	event, err := buildResponsesWSCreateEvent(jsonData, generate, streamID)
+	if err != nil {
+		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+	}
+	return event, nil
+}
+
+func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
+	limit := int64(helper.DefaultMaxScannerBufferSize)
+	if appconstant.StreamScannerMaxBufferMB > 0 {
+		limit = int64(appconstant.StreamScannerMaxBufferMB) << 20
+	}
+	target.SetReadLimit(limit)
+	s.workers.Go(func() {
+		for {
+			kind, body, err := target.ReadMessage()
+			incoming := responsesWSMessage{kind: kind, body: body, err: err}
+			if state := s.getCurrent(); state != nil {
+				select {
+				case state.inbox <- incoming:
+					if err != nil {
+						return
+					}
+					continue
+				case <-state.done:
+				case <-s.ctx.Done():
+					return
+				}
+			}
+			// No request owns this message. An idle upstream that closed
+			// normally ends the client session with the same code.
+			if err != nil {
+				code := websocket.CloseInternalServerErr
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					code = err.(*websocket.CloseError).Code
+				}
+				s.shutdown(code, "upstream connection closed")
+				return
+			}
+			if writeErr := s.writeClient(kind, body); writeErr != nil {
+				s.shutdown(websocket.CloseInternalServerErr, "")
+				return
+			}
+		}
+	})
+}
+
+func (s *responsesWSSession) getCurrent() *responsesWSCallState {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	return s.current
+}
+
+func (s *responsesWSSession) tryReserveCurrent(state *responsesWSCallState) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.current != nil {
+		return false
+	}
+	s.current = state
+	return true
+}
+
+func (s *responsesWSSession) getTarget() *websocket.Conn {
+	s.connectionMu.Lock()
+	defer s.connectionMu.Unlock()
+	return s.target
+}
+
+func (s *responsesWSSession) setTarget(target *websocket.Conn) bool {
+	s.connectionMu.Lock()
+	defer s.connectionMu.Unlock()
+	if s.ctx.Err() != nil {
+		_ = target.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		_ = target.Close()
+		return false
+	}
+	s.target = target
+	return true
+}
+
+func (s *responsesWSSession) writeTarget(kind int, message []byte) error {
+	s.targetWriteMu.Lock()
+	defer s.targetWriteMu.Unlock()
+	target := s.getTarget()
+	if target == nil {
+		return errors.New("responses websocket upstream is not connected")
+	}
+	if err := target.SetWriteDeadline(time.Now().Add(responsesWSWriteTimeout)); err != nil {
+		return err
+	}
+	return target.WriteMessage(kind, message)
+}
+
+func (s *responsesWSSession) writeClient(kind int, message []byte) error {
+	s.clientWriteMu.Lock()
+	defer s.clientWriteMu.Unlock()
+	if err := s.client.SetWriteDeadline(s.clientWriteBudget.Deadline(time.Now(), len(message))); err != nil {
+		return err
+	}
+	return s.client.WriteMessage(kind, message)
+}
+
+func (s *responsesWSSession) sendError(eventID, streamID string, apiErr *types.NewAPIError) {
+	if apiErr == nil {
 		return
 	}
-	logger.LogError(c, fmt.Sprintf("responses websocket relay error: %s", common.LocalLogPreview(err.Error())))
+	payload, err := buildResponsesWSErrorPayload(eventID, streamID, apiErr)
+	if err == nil {
+		_ = s.writeClient(websocket.TextMessage, payload)
+	}
+}
+
+// shutdown ends the connection once. Each peer gets a close frame that says
+// why, bounded to one second, and both sockets close even if a write failed.
+// Close frames are control writes, which gorilla allows alongside a blocked
+// data writer, so shutdown takes no write lock and never waits for workers.
+func (s *responsesWSSession) shutdown(code int, reason string) {
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.connectionMu.Lock()
+		target, unregister := s.target, s.unregister
+		s.target, s.unregister = nil, nil
+		s.connectionMu.Unlock()
+		if unregister != nil {
+			unregister()
+		}
+		closeMessage := websocket.FormatCloseMessage(code, reason)
+		_ = s.client.WriteControl(websocket.CloseMessage, closeMessage, time.Now().Add(time.Second))
+		if target != nil {
+			_ = target.WriteControl(websocket.CloseMessage, closeMessage, time.Now().Add(time.Second))
+			_ = target.Close()
+		}
+		_ = s.client.Close()
+	})
+}
+
+func (s *responsesWSSession) registerChannelClose(channelID int) {
+	unregister := wsmanager.Register(channelID, wsmanager.KindResponses, s.closeForPolicy)
+	s.connectionMu.Lock()
+	if s.ctx.Err() != nil {
+		s.connectionMu.Unlock()
+		unregister()
+		return
+	}
+	s.unregister = unregister
+	s.connectionMu.Unlock()
+}
+
+// closeForPolicy tells both peers why the connection ends, like the realtime
+// relay does.
+func (s *responsesWSSession) closeForPolicy(reason string) {
+	s.shutdown(websocket.ClosePolicyViolation, reason)
+}
+
+// Stream identity belongs to the WebSocket envelope. For the legacy wrapped
+// input, the top-level field takes precedence over response.stream_id.
+func parseResponsesWSEnvelope(message []byte) (responsesWSCreateEvent, string, error) {
+	var event responsesWSCreateEvent
+	if err := common.Unmarshal(message, &event); err != nil {
+		return event, "", fmt.Errorf("invalid websocket event json: %w", err)
+	}
+	streamRaw := event.StreamID
+	if len(streamRaw) == 0 && len(event.Request) > 0 {
+		var wrapped struct {
+			StreamID common.RawMessage `json:"stream_id"`
+		}
+		if err := common.Unmarshal(event.Request, &wrapped); err == nil {
+			streamRaw = wrapped.StreamID
+		}
+	}
+	var streamID string
+	if len(streamRaw) > 0 {
+		if err := common.Unmarshal(streamRaw, &streamID); err != nil || len(streamID) < 1 || len(streamID) > 256 {
+			return event, "", errors.New("stream_id must contain 1-256 ASCII letters, digits, underscores, hyphens, or periods")
+		}
+		for _, char := range streamID {
+			if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' || char == '.') {
+				return event, "", errors.New("stream_id must contain only ASCII letters, digits, underscores, hyphens, or periods")
+			}
+		}
+	}
+	if strings.TrimSpace(event.Type) == "" {
+		return event, streamID, errors.New("websocket event type is required")
+	}
+	return event, streamID, nil
+}
+
+func newResponsesWSInvalidRequestError(err error) *types.NewAPIError {
+	return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+}
+
+// normalizeResponsesWSCreateEvent builds the HTTP-shaped request body from a
+// response.create whose envelope the read loop already parsed and validated.
+// The body is the message with the WebSocket members removed, and is decoded
+// once as the typed request; the envelope is not parsed again.
+func normalizeResponsesWSCreateEvent(message []byte, event responsesWSCreateEvent, streamID string) (responsesWSCreateRequest, error) {
+	create := responsesWSCreateRequest{StreamID: streamID, Generate: event.Generate}
+	// Edit the wrapped request on its own so outer fields cannot enter the HTTP body.
+	source := message
+	if len(event.Request) > 0 {
+		source = event.Request
+	}
+	if !ojson.GetBytesNoCopy(source, "@this").IsObject() {
+		return create, errors.New("response.create request must be a JSON object")
+	}
+	doc := ojson.NewDoc(source)
+	if len(event.Request) > 0 {
+		if generate := doc.Get("generate"); len(create.Generate) == 0 && generate.Exists() {
+			create.Generate = common.RawMessage(generate.Raw)
+		}
+	} else {
+		for _, key := range []string{"type", "event_id", "background", "stream", "stream_options"} {
+			if err := relaycommon.DeleteJSONMember(doc, key); err != nil {
+				return create, err
+			}
+		}
+	}
+	for _, key := range []string{"generate", "stream_id"} {
+		if err := relaycommon.DeleteJSONMember(doc, key); err != nil {
+			return create, err
+		}
+	}
+	payload := doc.Bytes()
+	if err := common.Unmarshal(payload, &create.Request); err != nil {
+		return create, err
+	}
+	if helper.ExceedsMaxTokensLimit(create.Request.MaxOutputTokens) {
+		return create, errors.New("max_output_tokens is invalid")
+	}
+	create.Request.Stream = nil
+	create.Request.StreamOptions = nil
+	create.Body = payload
+	return create, nil
+}
+
+func buildResponsesWSCreateEvent(jsonData []byte, generate common.RawMessage, streamID string) ([]byte, error) {
+	if !ojson.ValidBytes(jsonData) || !ojson.GetBytesNoCopy(jsonData, "@this").IsObject() {
+		return nil, errors.New("response.create body must be a JSON object")
+	}
+	event := ojson.NewDoc(jsonData)
+	// The normalized body never carries stream_id; a channel parameter
+	// override may inject one, and it must not shadow the envelope's value.
+	keys := []string{"type", "stream_id", "event_id", "background", "stream", "stream_options"}
+	if len(generate) > 0 {
+		keys = append(keys, "generate")
+	}
+	for _, key := range keys {
+		if err := relaycommon.DeleteJSONMember(event, key); err != nil {
+			return nil, err
+		}
+	}
+	if err := event.Set("type", responsesWSEventTypeResponseCreate); err != nil {
+		return nil, err
+	}
+	if streamID != "" {
+		if err := event.Set("stream_id", streamID); err != nil {
+			return nil, err
+		}
+	}
+	if len(generate) > 0 {
+		if err := event.SetRawBytes("generate", generate); err != nil {
+			return nil, err
+		}
+	}
+	return event.Bytes(), nil
+}
+
+func buildResponsesWSErrorPayload(eventID, streamID string, apiErr *types.NewAPIError, upstreamURLs ...string) ([]byte, error) {
+	if apiErr == nil {
+		return nil, errors.New("api error is nil")
+	}
+	status := apiErr.StatusCode
+	if status == 0 {
+		status = http.StatusInternalServerError
+	}
+	openaiErr := apiErr.ToOpenAIError(upstreamURLs...)
+	return common.Marshal(&responsesWSErrorEvent{
+		Type:     "error",
+		Status:   status,
+		EventID:  eventID,
+		StreamID: streamID,
+		Error:    &openaiErr,
+	})
+}
+
+// checkResponsesWSModelAccess applies the token model limit with the same name
+// matching as the HTTP distributor. Unlike HTTP, it also runs for requests
+// pinned to a channel: the check is stricter there on purpose, because a
+// persistent connection keeps serving the model after the pin was resolved.
+func checkResponsesWSModelAccess(c *gin.Context, modelName string) *types.NewAPIError {
+	if !common.GetContextKeyBool(c, appconstant.ContextKeyTokenModelLimitEnabled) {
+		return nil
+	}
+	raw, ok := common.GetContextKey(c, appconstant.ContextKeyTokenModelLimit)
+	if !ok {
+		return types.NewErrorWithStatusCode(errors.New("token has no model access"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	tokenModelLimit, ok := raw.(map[string]bool)
+	if !ok {
+		tokenModelLimit = map[string]bool{}
+	}
+	if !middleware.TokenModelLimitAllows(tokenModelLimit, modelName) {
+		return types.NewErrorWithStatusCode(fmt.Errorf("token is not allowed to use model %s", modelName), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
+	}
+	return nil
+}
+
+// selectResponsesWSChannel narrows the shared HTTP selection to channels that
+// speak the Responses WebSocket protocol and renders its outcome as a
+// non-retryable NewAPIError.
+func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *service.RetryParam) (*appmodel.Channel, *types.NewAPIError) {
+	constraints := service.GetChannelConstraints(c)
+	if !slices.ContainsFunc(constraints.Filters, func(filter appdto.ChannelFilter) bool {
+		return filter.Kind == appdto.FilterResponsesWebSocket
+	}) {
+		constraints.AddFilter(appdto.ChannelFilter{Kind: appdto.FilterResponsesWebSocket})
+	}
+	channel, _, selectErr := service.SelectChannelForRequest(c, modelName, retryParam)
+	if selectErr != nil {
+		message := selectErr.Message
+		if selectErr.MessageID != "" {
+			message = i18n.T(c, selectErr.MessageID, selectErr.Params)
+		}
+		code := selectErr.Code
+		if code == "" {
+			code = types.ErrorCodeGetChannelFailed
+		}
+		return nil, types.NewErrorWithStatusCode(errors.New(message), code, selectErr.StatusCode, types.ErrOptionWithSkipRetry())
+	}
+	if err := middleware.SetupContextForSelectedChannel(c, channel, modelName); err != nil {
+		return nil, err
+	}
+	return channel, nil
 }

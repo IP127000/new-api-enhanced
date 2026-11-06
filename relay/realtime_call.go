@@ -9,8 +9,9 @@ import (
 	appconstant "github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,6 +24,7 @@ func RealtimeCallHelper(c *gin.Context) *types.NewAPIError {
 		return types.NewError(err, types.ErrorCodeGenRelayInfoFailed)
 	}
 	info.InitChannelMeta(c)
+	info.RelayMode = relayconstant.RelayModeRealtimeCall
 	if info.ApiType != appconstant.APITypeCodex || info.ChannelType != appconstant.ChannelTypeCodex {
 		return types.NewErrorWithStatusCode(
 			fmt.Errorf("realtime calls require a Codex subscription channel"),
@@ -40,7 +42,6 @@ func RealtimeCallHelper(c *gin.Context) *types.NewAPIError {
 		}
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, status, types.ErrOptionWithSkipRetry())
 	}
-	info.UpstreamRequestBodySize = storage.Size()
 
 	adaptor := GetAdaptor(info.ApiType)
 	if adaptor == nil {
@@ -56,6 +57,18 @@ func RealtimeCallHelper(c *gin.Context) *types.NewAPIError {
 		return types.NewError(fmt.Errorf("realtime call upstream returned an invalid response"), types.ErrorCodeDoRequestFailed)
 	}
 	defer service.CloseResponseBodyGracefully(resp)
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.Header.Get("Location") != "" {
+		var credential struct {
+			AccountID string `json:"account_id"`
+		}
+		_ = common.UnmarshalJsonStr(info.ApiKey, &credential)
+		if err := service.RememberRealtimeCall(c, resp.Header.Get("Location"), service.RealtimeCallBinding{
+			ChannelID: info.ChannelId, Model: info.OriginModelName, KeyIndex: info.ChannelMultiKeyIndex, AccountID: credential.AccountID,
+		}); err != nil {
+			return types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
 
 	for key, values := range resp.Header {
 		if !service.ShouldCopyUpstreamHeader(c, key, values) {

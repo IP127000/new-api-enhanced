@@ -1,20 +1,68 @@
 package codex
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/QuantumNous/new-api/constant"
 	appconstant "github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/samber/lo"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetRequestURLAlphaSearch(t *testing.T) {
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{
+			ChannelType:    constant.ChannelTypeCodex,
+			ChannelBaseUrl: "https://chatgpt.com",
+		},
+		RelayMode: relayconstant.RelayModeAlphaSearch,
+	}
+
+	url, err := adaptor.GetRequestURL(info)
+	require.NoError(t, err)
+	assert.Equal(t, "https://chatgpt.com/backend-api/codex/alpha/search", url)
+}
+
+// The Codex backend rejects these fields, so the adaptor clears them rather
+// than forwarding what the client sent.
+func TestConvertOpenAIResponsesRequestDropsPenalties(t *testing.T) {
+	adaptor := &Adaptor{}
+	info := &relaycommon.RelayInfo{
+		ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeCodex},
+		RelayMode:   relayconstant.RelayModeResponses,
+	}
+
+	converted, err := adaptor.ConvertOpenAIResponsesRequest(nil, info, dto.OpenAIResponsesRequest{
+		Model:            "gpt-5-codex",
+		Input:            json.RawMessage(`"hello"`),
+		MaxOutputTokens:  lo.ToPtr(uint(128)),
+		Temperature:      lo.ToPtr(1.0),
+		FrequencyPenalty: json.RawMessage(`1.5`),
+		PresencePenalty:  json.RawMessage(`1.5`),
+	})
+	require.NoError(t, err)
+
+	request, ok := converted.(dto.OpenAIResponsesRequest)
+	require.True(t, ok)
+	assert.Nil(t, request.MaxOutputTokens)
+	assert.Nil(t, request.Temperature)
+	assert.Nil(t, request.FrequencyPenalty)
+	assert.Nil(t, request.PresencePenalty)
+}
 
 func TestCodexRequestPreservesBodyTraceHeadersAndServerAuth(t *testing.T) {
 	service.InitHttpClient()
@@ -52,7 +100,6 @@ func TestCodexRequestPreservesBodyTraceHeadersAndServerAuth(t *testing.T) {
 			"X-OpenAI-Memgen-Request":               "memgen-123",
 			"X-ResponsesAPI-Include-Timing-Metrics": "true",
 		},
-		UpstreamRequestBodySize: int64(len(originalBody)),
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ApiType:        appconstant.APITypeCodex,
 			ChannelType:    appconstant.ChannelTypeCodex,
@@ -151,7 +198,7 @@ func TestCodexRealtimeUsesSubscriptionAuthAndRealtimeHeaders(t *testing.T) {
 func TestCodexRealtimeRequestURLUsesMappedModel(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		RelayMode:      relayconstant.RelayModeRealtime,
-		RequestURLPath: "/v1/realtime?intent=quicksilver&model=client-model&call_id=rtc_123",
+		RequestURLPath: "/v1/realtime?intent=quicksilver&model=client-model",
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ChannelType:       appconstant.ChannelTypeCodex,
 			ChannelBaseUrl:    "https://chatgpt.com",
@@ -162,7 +209,7 @@ func TestCodexRealtimeRequestURLUsesMappedModel(t *testing.T) {
 	requestURL, err := (&Adaptor{}).GetRequestURL(info)
 	require.NoError(t, err)
 	require.Equal(t,
-		"wss://api.openai.com/v1/realtime?call_id=rtc_123&intent=quicksilver&model=gpt-realtime-1.5",
+		"wss://api.openai.com/v1/realtime?intent=quicksilver&model=gpt-realtime-1.5",
 		requestURL)
 }
 
@@ -196,9 +243,8 @@ func TestCodexRealtimeCallForwardsMultipartWithSubscriptionAuth(t *testing.T) {
 	c.Request = incoming
 
 	info := &relaycommon.RelayInfo{
-		RelayMode:               relayconstant.RelayModeRealtime,
-		RequestURLPath:          incoming.URL.String(),
-		UpstreamRequestBodySize: int64(len(body)),
+		RelayMode:      relayconstant.RelayModeRealtime,
+		RequestURLPath: incoming.URL.String(),
 		ChannelMeta: &relaycommon.ChannelMeta{
 			ApiType:           appconstant.APITypeCodex,
 			ChannelType:       appconstant.ChannelTypeCodex,
@@ -242,4 +288,74 @@ func TestCodexRealtimeCallURLUsesOpenAIDataPlaneWithoutModelQuery(t *testing.T) 
 	require.Equal(t,
 		"https://api.openai.com/v1/realtime/calls?architecture=avas&intent=quicksilver",
 		requestURL)
+}
+
+func TestCodexSidebandURLPreservesCallIDWithoutModel(t *testing.T) {
+	for _, path := range []string{"/v1/live/rtc_owned", "/v1/realtime?call_id=rtc_owned"} {
+		info := &relaycommon.RelayInfo{
+			RelayMode: relayconstant.RelayModeRealtime, RequestURLPath: path,
+			ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: "https://chatgpt.com", ChannelType: appconstant.ChannelTypeCodex, UpstreamModelName: "gpt-live-1-codex"},
+		}
+		got, err := (&Adaptor{}).GetRequestURL(info)
+		require.NoError(t, err)
+		require.Equal(t, "wss://api.openai.com"+path, got)
+	}
+}
+
+func TestCodexRealtimeForwardsFramelessAudioEvents(t *testing.T) {
+	const audioInput = `{"type":"input_audio.append","audio":"AQID","future":true}`
+	const audioOutput = `{"type":"output_audio.delta","delta":"BAUG","future":true}`
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, body, err := conn.ReadMessage()
+		if !assert.NoError(t, err) {
+			return
+		}
+		assert.Equal(t, audioInput, string(body))
+		assert.NoError(t, conn.WriteMessage(websocket.TextMessage, []byte(audioOutput)))
+		_, _, _ = conn.ReadMessage()
+	}))
+	defer upstream.Close()
+	done := make(chan struct{})
+	bridge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer close(done)
+		client, err := upgrader.Upgrade(w, r, nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		defer client.Close()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = r
+		info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeRealtime, RequestURLPath: "/v1/live?model=gpt-live-1-codex", ClientWs: client, StartTime: time.Now(), ChannelMeta: &relaycommon.ChannelMeta{ApiType: appconstant.APITypeCodex, ChannelType: appconstant.ChannelTypeCodex, ChannelBaseUrl: upstream.URL, UpstreamModelName: "gpt-live-1-codex", ApiKey: `{"access_token":"server-token","account_id":"server-account"}`}}
+		adaptor := &Adaptor{}
+		result, err := adaptor.DoRequest(c, info, nil)
+		if !assert.NoError(t, err) {
+			return
+		}
+		info.TargetWs = result.(*websocket.Conn)
+		defer info.TargetWs.Close()
+		_, apiErr := adaptor.DoResponse(c, nil, info)
+		assert.Nil(t, apiErr)
+	}))
+	defer bridge.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(bridge.URL, "http"), nil)
+	require.NoError(t, err)
+	defer client.Close()
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(audioInput)))
+	_, body, err := client.ReadMessage()
+	require.NoError(t, err)
+	require.Equal(t, audioOutput, string(body))
+	require.NoError(t, client.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("realtime bridge did not close")
+	}
 }

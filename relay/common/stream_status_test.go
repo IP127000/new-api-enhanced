@@ -82,7 +82,7 @@ func TestStreamStatus_RecordError_CapAtMax(t *testing.T) {
 	t.Parallel()
 	s := NewStreamStatus()
 
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		s.RecordError(fmt.Sprintf("error_%d", i))
 	}
 
@@ -101,7 +101,7 @@ func TestStreamStatus_RecordError_Concurrent(t *testing.T) {
 	s := NewStreamStatus()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
@@ -112,20 +112,6 @@ func TestStreamStatus_RecordError_Concurrent(t *testing.T) {
 
 	assert.Equal(t, 100, s.TotalErrorCount())
 	assert.LessOrEqual(t, len(s.Errors), maxStreamErrorEntries)
-}
-
-func TestStreamStatus_ClientCloseExpected(t *testing.T) {
-	t.Parallel()
-
-	var nilStatus *StreamStatus
-	assert.False(t, nilStatus.IsClientCloseExpected())
-	nilStatus.MarkClientCloseExpected()
-
-	s := NewStreamStatus()
-	assert.False(t, s.IsClientCloseExpected())
-
-	s.MarkClientCloseExpected()
-	assert.True(t, s.IsClientCloseExpected())
 }
 
 func TestStreamStatus_HasErrors_Empty(t *testing.T) {

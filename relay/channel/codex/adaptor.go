@@ -11,15 +11,14 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
-	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
-	"github.com/QuantumNous/new-api/types"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 )
 
 type Adaptor struct {
@@ -112,15 +111,17 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 	// rm max_output_tokens
 	request.MaxOutputTokens = nil
 	request.Temperature = nil
+	request.FrequencyPenalty = nil
+	request.PresencePenalty = nil
 	return request, nil
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
-	if info != nil && info.RelayMode == relayconstant.RelayModeRealtime {
+	if info != nil && (info.RelayMode == relayconstant.RelayModeRealtime || info.RelayMode == relayconstant.RelayModeRealtimeCall) {
 		if isRealtimeCallRequest(info) {
 			return channel.DoApiRequest(a, c, info, requestBody)
 		}
-		return a.doRealtimeRequest(c, info)
+		return channel.DoWssRequest(a, c, info, requestBody)
 	}
 	return channel.DoApiRequest(a, c, info, requestBody)
 }
@@ -130,6 +131,9 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 	case relayconstant.RelayModeRealtime:
 		realtimeErr, realtimeUsage := openai.OpenaiRealtimeHandler(c, info)
 		return realtimeUsage, realtimeErr
+	case relayconstant.RelayModeAlphaSearch:
+		// Alpha search responses are handled by relay.AlphaSearchHelper.
+		return nil, types.NewError(errors.New("codex channel: alpha search response should be handled by AlphaSearchHelper"), types.ErrorCodeInvalidRequest)
 	case relayconstant.RelayModeResponsesCompact:
 		return openai.OaiResponsesCompactionHandler(c, resp)
 	case relayconstant.RelayModeResponses:
@@ -142,8 +146,6 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 			return openai.OpenaiImageStreamHandler(c, info, resp)
 		}
 		return openai.OpenaiImageHandler(c, info, resp)
-	case relayconstant.RelayModeCodexWebSearch:
-		return openai.CodexWebSearchHandler(c, info, resp)
 	default:
 		return nil, types.NewError(errors.New("codex channel: endpoint not supported"), types.ErrorCodeInvalidRequest)
 	}
@@ -168,9 +170,9 @@ func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
 		path = "/backend-api/codex/images/generations"
 	case relayconstant.RelayModeImagesEdits:
 		path = "/backend-api/codex/images/edits"
-	case relayconstant.RelayModeCodexWebSearch:
+	case relayconstant.RelayModeAlphaSearch:
 		path = "/backend-api/codex/alpha/search"
-	case relayconstant.RelayModeRealtime:
+	case relayconstant.RelayModeRealtime, relayconstant.RelayModeRealtimeCall:
 		return codexRealtimeRequestURL(info)
 	default:
 		return "", errors.New("codex channel: endpoint not supported")
@@ -207,7 +209,7 @@ func (a *Adaptor) SetupRequestHeader(c *gin.Context, req *http.Header, info *rel
 	// trusted custom provider. It is not an upstream credential and must never
 	// be forwarded to ChatGPT.
 	req.Del("x-openai-actor-authorization")
-	if info.RelayMode == relayconstant.RelayModeRealtime {
+	if info.RelayMode == relayconstant.RelayModeRealtime || info.RelayMode == relayconstant.RelayModeRealtimeCall {
 		headerNames := appconstant.CodexClientPassThroughHeaders()
 		headerNames = append(headerNames, "openai-alpha", "x-session-id")
 		for _, name := range headerNames {
@@ -274,12 +276,12 @@ func codexRealtimeRequestURL(info *relaycommon.RelayInfo) (string, error) {
 	}
 
 	upstreamPath := "/v1/realtime"
-	isCall := downstream.Path == "/v1/realtime/calls"
+	isCall := isRealtimeCallRequest(info)
 	if isCall {
 		upstreamPath = downstream.Path
 	}
 	if strings.HasPrefix(downstream.Path, "/v1/live") {
-		upstreamPath = "/v1/live"
+		upstreamPath = downstream.Path
 	}
 	fullURL := relaycommon.GetFullRequestURL(baseURL, upstreamPath, info.ChannelType)
 	upstream, err := url.Parse(fullURL)
@@ -306,7 +308,7 @@ func codexRealtimeRequestURL(info *relaycommon.RelayInfo) (string, error) {
 			query.Add(name, value)
 		}
 	}
-	if !isCall {
+	if !isCall && downstream.Query().Get("call_id") == "" && !strings.HasPrefix(downstream.Path, "/v1/live/") {
 		model := strings.TrimSpace(info.UpstreamModelName)
 		if model == "" {
 			model = strings.TrimSpace(downstream.Query().Get("model"))
@@ -324,27 +326,5 @@ func isRealtimeCallRequest(info *relaycommon.RelayInfo) bool {
 		return false
 	}
 	downstream, err := url.Parse(info.RequestURLPath)
-	return err == nil && downstream.Path == "/v1/realtime/calls"
-}
-
-func (a *Adaptor) doRealtimeRequest(c *gin.Context, info *relaycommon.RelayInfo) (*websocket.Conn, error) {
-	requestURL, err := a.GetRequestURL(info)
-	if err != nil {
-		return nil, fmt.Errorf("get realtime request URL failed: %w", err)
-	}
-	header := http.Header{}
-	if err := a.SetupRequestHeader(c, &header, info); err != nil {
-		return nil, fmt.Errorf("setup realtime request header failed: %w", err)
-	}
-	connection, response, err := websocket.DefaultDialer.Dial(requestURL, header)
-	if err != nil {
-		if response != nil {
-			if response.Body != nil {
-				_ = response.Body.Close()
-			}
-			return nil, fmt.Errorf("dial Codex realtime upstream failed (status %d): %w", response.StatusCode, err)
-		}
-		return nil, fmt.Errorf("dial Codex realtime upstream failed: %w", err)
-	}
-	return connection, nil
+	return err == nil && (downstream.Path == "/v1/realtime/calls" || info.RelayMode == relayconstant.RelayModeRealtimeCall)
 }
